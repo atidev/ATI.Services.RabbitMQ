@@ -2,14 +2,11 @@
   <PropertyGroup Label="Main">
     <TargetFramework>netcoreapp3.1</TargetFramework>
     <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Authors>Team Services</Authors>
     <Company>ATI</Company>
     <LangVersion>9</LangVersion>
-    <VersionPrefix>2.3.1</VersionPrefix>
     <PublishReadyToRun>true</PublishReadyToRun>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <PackageVersion>3.0.0</PackageVersion>
     <PackageId>atisu.services.rabbitmq</PackageId>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
