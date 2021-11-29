@@ -19,3 +19,64 @@
 7. В разделе [Releses](https://github.com/atidev/ATI.Services.RabbitMQ/releases) появляется информация о нашем релиз и release notes.
 
 ## Документация
+---
+### Rabbit
+
+Конфигурируем класс `EventbusOptions`, который должен выглядеть так:
+```json 
+  "EventbusOptions": {
+    "ServiceName": "Service-name",
+    "ConnectionString": "Rabbit-mq-connection.string",
+    "Environment": "env",
+    "ErrorQueueName":"error_queue_name", //очередь для хранения ошибок обработки сообщений
+    "RabbitConnectInterval":"00:00:05" //время переподключения к RabbitMQ 
+  }
+```
+В `Startup.cs` вызываем 
+```c#
+  services.AddEventBus();
+  //или, если ChangeTrackerOptions лежат в другой секции
+  services.AddEventBus(typeof(ChangeTrackerManagerOptions).Name);
+```
+Далее создаем свой `ChangeTrackingManager`, который отвечает за инициализацию очередей и подписок на них при старте сервиса:
+```c#
+ public sealed class EventbusManager : IInitializer
+ {
+   public InitializeOrder Order { get; set; } = InitializeOrder.ChangeTracker;
+   public async Task InitializeAsync()
+   {
+   }
+ }
+```
+Регистрируем в качестве Singlton `RMQTopology`, если необходимо. 
+Готово.
+Конфигурим класс `ChangeTrackerOptions`, который должен выглядеть так:
+```json 
+  "ChangeTrackerOptions": {
+    "ServiceName": "Service-name",
+    "ConnectionString": "Rabbit-mq-connection.string",
+    "Environment": "env",
+    "ErrorQueueName":"error_queue_name", //очередь для хранения ошибок обработки сообщений
+    "RabbitConnectInterval":"00:00:05" //время переподключения к RabbitMQ 
+  }
+```
+В `Startup.cs` вызываем 
+```c#
+  services.AddChangeTracking();
+  //или, если ChangeTrackerOptions лежат в другой секции
+  services.AddChangeTracking(typeof(ChangeTrackerManagerOptions).Name);
+```
+Далее создаем свой `ChangeTrackingManager`, который отвечает за инициализацию очередей и подписок на них при старте сервиса:
+```c#
+ public sealed class ChangeTrackingManager : IInitializer
+ {
+   public InitializeOrder Order { get; set; } = InitializeOrder.ChangeTracker;
+   public async Task InitializeAsync()
+   {
+   }
+ }
+```
+Регистрируем в качестве Singlton `RMQTopology`, если необходимо. 
+Готово.
+
+
