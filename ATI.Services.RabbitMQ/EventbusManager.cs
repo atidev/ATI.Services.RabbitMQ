@@ -128,6 +128,7 @@ namespace ATI.Services.RabbitMQ
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
                 var messageProperties = new MessageProperties();
+                messageProperties.AppId = _options.ServiceName;
                 var exchange = new Exchange(exchangeName);
                 var body = BodyEncoding.GetBytes(publishBody);
 
@@ -163,6 +164,7 @@ namespace ATI.Services.RabbitMQ
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
                 var messageProperties = new MessageProperties();
+                messageProperties.AppId = _options.ServiceName;
                 var exchange = new Exchange(exchangeName);
                 var bodySerializer = serializer ?? _jsonSerializer;
                 var body = bodySerializer.ToJsonBytes(publishObject);
