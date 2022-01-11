@@ -8,6 +8,7 @@ using ATI.Services.Common.Initializers;
 using ATI.Services.Common.Initializers.Interfaces;
 using ATI.Services.Common.Logging;
 using ATI.Services.Common.Metrics;
+using ATI.Services.Common.ServiceVariables;
 using EasyNetQ;
 using EasyNetQ.Topology;
 using JetBrains.Annotations;
@@ -128,7 +129,7 @@ namespace ATI.Services.RabbitMQ
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
                 var messageProperties = new MessageProperties();
-                messageProperties.AppId = _options.ServiceName;
+                messageProperties.AppId = ServiceVariables.ServiceAsClientName;
                 var exchange = new Exchange(exchangeName);
                 var body = BodyEncoding.GetBytes(publishBody);
 
@@ -164,7 +165,7 @@ namespace ATI.Services.RabbitMQ
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
                 var messageProperties = new MessageProperties();
-                messageProperties.AppId = _options.ServiceName;
+                messageProperties.AppId = ServiceVariables.ServiceAsClientName;
                 var exchange = new Exchange(exchangeName);
                 var bodySerializer = serializer ?? _jsonSerializer;
                 var body = bodySerializer.ToJsonBytes(publishObject);
