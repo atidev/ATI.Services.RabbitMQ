@@ -36,6 +36,8 @@ namespace ATI.Services.RabbitMQ
             _consumer.Received += async (sender, args) => await OnReceivedInternalAsync(args).ConfigureAwait(false);
 
             _channel.BasicConsume(queue: QueueName, autoAck: AutoAck, consumer: _consumer);
+
+            RabbitMqDeclaredQueues.DeclaredQueues.Add(new QueueInfo{QueueName = QueueName});
         }
         
         private async Task OnReceivedInternalAsync(BasicDeliverEventArgs ea)
