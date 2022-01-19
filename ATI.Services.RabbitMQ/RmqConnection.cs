@@ -5,6 +5,8 @@ using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using ATI.Services.Common.Initializers;
+using ATI.Services.Common.Initializers.Interfaces;
 using ATI.Services.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -13,7 +15,8 @@ using RabbitMQ.Client;
 
 namespace ATI.Services.RabbitMQ
 {
-    public class RmqConnection : IDisposable
+    [InitializeOrder(Order = InitializeOrder.First)]
+    public class RmqConnection : IDisposable, IInitializer
     {
         private readonly ILogger<RmqConnection> _logger;
         private readonly RmqConnectionConfig _config;
@@ -213,6 +216,12 @@ namespace ATI.Services.RabbitMQ
             {
                 rmqProducer.Dispose();
             }
+        }
+
+        public Task InitializeAsync()
+        {
+            Init();
+            return Task.CompletedTask;
         }
     }
 }
