@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup Label="Main">
-    <TargetFramework>netstandard2.1</TargetFramework>
-    <Version>4.0.0-rc2</Version>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <Version>4.0.0-rc3</Version>
     <Authors>Team Services</Authors>
     <Company>ATI</Company>
     <LangVersion>9</LangVersion>
@@ -16,6 +16,7 @@
     <NoWarn>1701;1702;CS1591;CS1571;CS1573;CS1574</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="atisu.services.common" Version="8.0.1" />
     <PackageReference Include="atisu.services.serialization" Version="1.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="3.1.8" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="3.1.8" />
