@@ -48,7 +48,7 @@ namespace ATI.Services.RabbitMQ
             _customRmqProducers.GetOrAdd(exchangeName, producer);
         }
 
-        public Task PublishAsync(
+        public Task PublishBytesAsync(
             byte[] publishBody,
             string exchangeName,
             string routingKey,

@@ -1,9 +1,15 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ATI.Services.RabbitMQ
 {
     public static class RegistrationExtensions
     {
+        public static void AddRmq(this IServiceCollection services, IConfiguration configuration, string optionName = "RmqConnectionConfig")
+        {
+            services.Configure<RmqConnectionConfig>(configuration.GetSection(optionName));
+            services.AddSingleton<RmqConnection>();
+        }
 
         public static void RegisterRmqConsumer<TService>(this IServiceCollection services) where TService : class, IRmqConsumer
         {
