@@ -25,6 +25,9 @@ namespace ATI.Services.RabbitMQ
         private readonly ConcurrentDictionary<string, InternalRmqProducer> _customRmqProducers = new ConcurrentDictionary<string, InternalRmqProducer>();
         private readonly ConcurrentBag<IRmqConsumer> _customRmqConsumers = new ConcurrentBag<IRmqConsumer>();
 
+        private readonly object _initializationLock = new();
+        private bool _initialized;
+
         public RmqConnection(IOptions<RmqConnectionConfig> config, ILogger<RmqConnection> logger, IServiceProvider serviceProvider)
         {
             _logger = logger;
@@ -34,10 +37,24 @@ namespace ATI.Services.RabbitMQ
 
         public void Init()
         {
-            var producers = _serviceProvider.GetServices<IRmqProducer>();
-            var consumers = _serviceProvider.GetServices<IRmqConsumer>();
+            if (_initialized)
+            {
+                return;
+            }
 
-            Init(producers.Concat(_customRmqProducers.Values), consumers.Concat(_customRmqConsumers));
+            lock (_initializationLock)
+            {
+                if (_initialized)
+                {
+                    return;
+                }
+
+                var producers = _serviceProvider.GetServices<IRmqProducer>();
+                var consumers = _serviceProvider.GetServices<IRmqConsumer>();
+
+                Init(producers.Concat(_customRmqProducers.Values), consumers.Concat(_customRmqConsumers));
+                _initialized = true;
+            }
         }
 
         public void RegisterProducer(
@@ -123,7 +140,15 @@ namespace ATI.Services.RabbitMQ
             serializer ??= NewtonsoftJsonSerializer.SnakeCase;
             var consumer = new InternalRmqConsumer<T>(
                 _logger, onReceivedAsync, exchangeType, exchangeName, routingKey, serializer, queueName, autoDelete, durable);
-            _customRmqConsumers.Add(consumer);
+
+            lock (_initializationLock)
+            {
+                _customRmqConsumers.Add(consumer);
+                if (_initialized)
+                {
+                    consumer.Init(_connection);
+                }
+            }
         }
 
         private void Init(IEnumerable<IRmqProducer> producers, IEnumerable<IRmqConsumer> consumers)
