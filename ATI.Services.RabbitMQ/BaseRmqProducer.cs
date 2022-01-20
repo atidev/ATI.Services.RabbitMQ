@@ -2,23 +2,21 @@
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
+using ATI.Services.Common.Extensions;
+using ATI.Services.Common.Logging;
+using ATI.Services.Common.ServiceVariables;
+using JetBrains.Annotations;
+using NLog;
 using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
 
 namespace ATI.Services.RabbitMQ
 {
-    public sealed class PublishErrorException : Exception
-    {
-        public PublishErrorException(string message) : base(message)
-        {
-
-        }
-    }
-
+    [PublicAPI]
     public abstract class BaseRmqProducer : BaseRmqProvider, IRmqProducer
     {
-        private readonly BlockingCollection<(byte[] body, string routingKey, TimeSpan expiration, TaskCompletionSource<bool> taskCompletionSource)> _messageQueue;
+        private readonly
+            BlockingCollection<(byte[] body, string routingKey, TimeSpan expiration, TaskCompletionSource<bool>
+                taskCompletionSource)> _messageQueue;
 
         private IModel _channel;
         private TimeSpan _defaultTimeout;
@@ -26,11 +24,13 @@ namespace ATI.Services.RabbitMQ
         protected abstract string DefaultRoutingKey { get; }
         private bool _initialized;
         private readonly object _lock = new object();
-        
+
         protected BaseRmqProducer(ILogger logger)
         {
             _logger = logger;
-            _messageQueue = new BlockingCollection<(byte[] body, string routingKey, TimeSpan expiration, TaskCompletionSource<bool> taskCompletionSource)>();
+            _messageQueue =
+                new BlockingCollection<(byte[] body, string routingKey, TimeSpan expiration, TaskCompletionSource<bool>
+                    taskCompletionSource)>();
         }
 
         internal void EnsureInitialized(IConnection connection, TimeSpan timeout)
@@ -47,7 +47,7 @@ namespace ATI.Services.RabbitMQ
                     return;
                 }
 
-                _logger.LogWarning($"Не зарегистрирован заранее продьюсер с ExchangeName: {ExchangeName}");
+                _logger.Warn($"Не зарегистрирован заранее продьюсер с ExchangeName: {ExchangeName}");
                 Init(connection, timeout);
             }
         }
@@ -58,7 +58,9 @@ namespace ATI.Services.RabbitMQ
             _channel = connection.CreateModel();
             _channel.ExchangeDeclare(exchange: ExchangeName, type: GetExchangeType(), durable: DurableExchange);
             _channel.ConfirmSelect();
-            _channel.BasicNacks += OnError;
+            _channel.BasicNacks += (_, _) =>
+                _logger.Error(
+                    $"Ошибка при подтверждении отправки сообщения в exchange {ExchangeName} паблишера {GetType().FullName}.");
 
             new Thread(ProcessAllMessages) { IsBackground = true }.Start();
             _initialized = true;
@@ -74,23 +76,27 @@ namespace ATI.Services.RabbitMQ
             AddMessageToQueue(body, routingKey, expiration, CancellationToken.None);
         }
 
-        public Task<bool> PublishAsync<T>(T model, string routingKey = null, TimeSpan timeout = default, TimeSpan expiration = default)
+        public Task<bool> PublishAsync<T>(T model, string routingKey = null, TimeSpan timeout = default,
+            TimeSpan expiration = default)
         {
             return PublishAsync(model, CancellationToken.None, routingKey, timeout, expiration);
         }
 
-        public Task<bool> PublishAsync<T>(T model, CancellationToken token, string routingKey = null, TimeSpan timeout = default, TimeSpan expiration = default)
+        public Task<bool> PublishAsync<T>(T model, CancellationToken token, string routingKey = null,
+            TimeSpan timeout = default, TimeSpan expiration = default)
         {
             var body = Serializer.Serialize(model);
             return PublishBytesAsync(body, token, routingKey, timeout, expiration);
         }
 
-        public Task<bool> PublishBytesAsync(byte[] body, string routingKey = null, TimeSpan timeout = default, TimeSpan expiration = default)
+        public Task<bool> PublishBytesAsync(byte[] body, string routingKey = null, TimeSpan timeout = default,
+            TimeSpan expiration = default)
         {
             return PublishBytesAsync(body, CancellationToken.None, routingKey, timeout, expiration);
         }
 
-        public async Task<bool> PublishBytesAsync(byte[] body, CancellationToken token, string routingKey = null, TimeSpan timeout = default, TimeSpan expiration = default)
+        public async Task<bool> PublishBytesAsync(byte[] body, CancellationToken token, string routingKey = null,
+            TimeSpan timeout = default, TimeSpan expiration = default)
         {
             if (timeout == default)
             {
@@ -98,7 +104,8 @@ namespace ATI.Services.RabbitMQ
             }
 
             using var cts = new CancellationTokenSource();
-            var taskCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var taskCompletionSource =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancellationToken = token.CanBeCanceled
                 ? CancellationTokenSource.CreateLinkedTokenSource(cts.Token, token).Token
                 : cts.Token;
@@ -145,28 +152,34 @@ namespace ATI.Services.RabbitMQ
                         properties.Expiration = ((int)expiration.TotalMilliseconds).ToString();
                     }
 
+                    if (!ServiceVariables.ServiceAsClientName.IsNullOrEmpty())
+                    {
+                        properties.AppId = ServiceVariables.ServiceAsClientName;
+                    }
+
                     // BasicPublish не потокобезопасен, но lock не нужен,
                     // потому что все сообщения отправляются в одном потоке
                     _channel.BasicPublish(
-                        exchange: ExchangeName,
-                        routingKey: routingKey,
-                        basicProperties: properties,
-                        body: body);
+                        ExchangeName,
+                        routingKey,
+                        properties,
+                        body);
 
                     taskCompletionSource?.TrySetResult(true);
                 }
                 catch (Exception e)
                 {
-                    _logger.LogError(e, $"Ошибка при отправке сообщения в exchange {ExchangeName} паблишера {GetType()}");
+                    _logger.ErrorWithObject(e,
+                        $"Ошибка при отправке сообщения в exchange {ExchangeName} паблишера {GetType()}",
+                        body,
+                        routingKey,
+                        expiration,
+                        taskCompletionSource);
+
                     // Если упала ошибка - надо прокинуть её наверх
                     taskCompletionSource?.SetException(e);
                 }
             }
-        }
-
-        protected virtual void OnError(object sender, BasicNackEventArgs ea)
-        {
-            _logger.LogError($"Ошибка при подтверждении отправки сообщения в exchange {ExchangeName} паблишера {GetType().FullName}.");
         }
 
         public void Dispose()

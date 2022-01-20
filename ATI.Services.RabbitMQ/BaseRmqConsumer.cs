@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
+using ATI.Services.Common.Logging;
+using NLog;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -33,13 +34,13 @@ namespace ATI.Services.RabbitMQ
             _channel.QueueBind(QueueName, ExchangeName, RoutingKey);
 
             _consumer = new AsyncEventingBasicConsumer(_channel);
-            _consumer.Received += async (sender, args) => await OnReceivedInternalAsync(args).ConfigureAwait(false);
+            _consumer.Received += async (_, args) => await OnReceivedInternalAsync(args).ConfigureAwait(false);
 
             _channel.BasicConsume(queue: QueueName, autoAck: AutoAck, consumer: _consumer);
 
-            RabbitMqDeclaredQueues.DeclaredQueues.Add(new QueueInfo{QueueName = QueueName});
+            RabbitMqDeclaredQueues.DeclaredQueues.Add(new QueueInfo { QueueName = QueueName });
         }
-        
+
         private async Task OnReceivedInternalAsync(BasicDeliverEventArgs ea)
         {
             try
@@ -54,7 +55,7 @@ namespace ATI.Services.RabbitMQ
             }
             catch (Exception e)
             {
-                _logger.LogError(e, $"Error during message processing {GetType()}");
+                _logger.ErrorWithObject(e, $"Error during message processing {GetType()}", ea);
                 if (!AutoAck)
                 {
                     _channel.BasicNack(ea.DeliveryTag, false, RequeueOnError);

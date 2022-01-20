@@ -7,30 +7,37 @@ using System.Threading;
 using System.Threading.Tasks;
 using ATI.Services.Common.Initializers;
 using ATI.Services.Common.Initializers.Interfaces;
+using ATI.Services.Common.Logging;
 using ATI.Services.Serialization;
+using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NLog;
 using RabbitMQ.Client;
+using ILogger = NLog.ILogger;
 
 namespace ATI.Services.RabbitMQ
 {
+    [PublicAPI]
     [InitializeOrder(Order = InitializeOrder.First)]
     public class RmqConnection : IDisposable, IInitializer
     {
-        private readonly ILogger<RmqConnection> _logger;
+        private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
         private readonly RmqConnectionConfig _config;
         private IConnection _connection;
         private readonly IServiceProvider _serviceProvider;
-        private readonly ConcurrentDictionary<string, InternalRmqProducer> _customRmqProducers = new ConcurrentDictionary<string, InternalRmqProducer>();
+
+        private readonly ConcurrentDictionary<string, InternalRmqProducer> _customRmqProducers =
+            new ConcurrentDictionary<string, InternalRmqProducer>();
+
         private readonly ConcurrentBag<IRmqConsumer> _customRmqConsumers = new ConcurrentBag<IRmqConsumer>();
 
         private readonly object _initializationLock = new();
         private bool _initialized;
 
-        public RmqConnection(IOptions<RmqConnectionConfig> config, ILogger<RmqConnection> logger, IServiceProvider serviceProvider)
+        public RmqConnection(IOptions<RmqConnectionConfig> config,
+            IServiceProvider serviceProvider)
         {
-            _logger = logger;
             _serviceProvider = serviceProvider;
             _config = config.Value;
         }
@@ -64,7 +71,8 @@ namespace ATI.Services.RabbitMQ
             bool durable = true,
             ExchangeType exchangeType = ExchangeType.Topic)
         {
-            var producer = new InternalRmqProducer(_logger, exchangeType, serializer, exchangeName, defaultRoutingKey, durable);
+            var producer = new InternalRmqProducer(_logger, exchangeType, serializer, exchangeName, defaultRoutingKey,
+                durable);
             _customRmqProducers.GetOrAdd(exchangeName, producer);
         }
 
@@ -139,7 +147,8 @@ namespace ATI.Services.RabbitMQ
         {
             serializer ??= NewtonsoftJsonSerializer.SnakeCase;
             var consumer = new InternalRmqConsumer<T>(
-                _logger, onReceivedAsync, exchangeType, exchangeName, routingKey, serializer, queueName, autoDelete, durable);
+                _logger, onReceivedAsync, exchangeType, exchangeName, routingKey, serializer, queueName, autoDelete,
+                durable);
 
             lock (_initializationLock)
             {
@@ -175,31 +184,32 @@ namespace ATI.Services.RabbitMQ
                 consumer.Init(_connection);
             }
 
-            _connection.ConnectionShutdown += (obj, args) =>
+            _connection.ConnectionShutdown += (_, args) =>
             {
-                _logger.LogError($"Rmq connection shutdown. {args.ReplyText}");
+                _logger.Error($"Rmq connection shutdown. {args.ReplyText}");
             };
 
-            _connection.CallbackException += (obj, args) =>
+            _connection.CallbackException += (_, args) =>
             {
-                _logger.LogError(args.Exception, "Rmq callback exception.");
+                _logger.Error(args.Exception, "Rmq callback exception.");
             };
 
-            _connection.ConnectionBlocked += (obj, args) =>
+            _connection.ConnectionBlocked += (_, args) =>
             {
-                _logger.LogError($"Rmq connection blocked. {args.Reason}");
+                _logger.Error($"Rmq connection blocked. {args.Reason}");
             };
 
             _connection.ConnectionUnblocked += (obj, args) =>
             {
-                _logger.LogWarning("Rmq connection unblocked");
+                _logger.WarnWithObject("Rmq connection unblocked", obj, args);
             };
         }
 
         private static List<AmqpTcpEndpoint> GetAmqpTcpEndpoints(Uri connectionUri)
         {
             var ipAddress = Dns.GetHostAddresses(connectionUri.Host);
-            var amqpTcpEndpoints = ipAddress.Select(ip => new AmqpTcpEndpoint(ip.ToString(), connectionUri.Port)).ToList();
+            var amqpTcpEndpoints =
+                ipAddress.Select(ip => new AmqpTcpEndpoint(ip.ToString(), connectionUri.Port)).ToList();
             return amqpTcpEndpoints;
         }
 

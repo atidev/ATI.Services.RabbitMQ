@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Threading.Tasks;
 using ATI.Services.Serialization;
-using Microsoft.Extensions.Logging;
+using NLog;
 
 namespace ATI.Services.RabbitMQ
 {

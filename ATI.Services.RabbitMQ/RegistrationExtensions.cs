@@ -1,8 +1,10 @@
 ﻿using ATI.Services.Common.Extensions;
+using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ATI.Services.RabbitMQ
 {
+    [PublicAPI]
     public static class RegistrationExtensions
     {
         public static void AddRmq(this IServiceCollection services)
