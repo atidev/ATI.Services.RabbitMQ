@@ -5,7 +5,6 @@ namespace ATI.Services.RabbitMQ
     public abstract class BaseRmqProvider
     {
         protected abstract ExchangeType ExchangeType { get; }
-        protected abstract ISerializer Serializer { get; }
         protected abstract string ExchangeName { get; }
         protected virtual bool DurableExchange => true;
 

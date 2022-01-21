@@ -5,11 +5,12 @@ using System.Threading.Tasks;
 using ATI.Services.Common.Extensions;
 using ATI.Services.Common.Logging;
 using ATI.Services.Common.ServiceVariables;
+using ATI.Services.Serialization;
 using JetBrains.Annotations;
 using NLog;
 using RabbitMQ.Client;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ.Producers
 {
     [PublicAPI]
     public abstract class BaseRmqProducer : BaseRmqProvider, IRmqProducer
@@ -23,7 +24,9 @@ namespace ATI.Services.RabbitMQ
         private readonly ILogger _logger;
         protected abstract string DefaultRoutingKey { get; }
         private bool _initialized;
+        private ISerializer Serializer { get; }
         private readonly object _lock = new object();
+
 
         protected BaseRmqProducer(ILogger logger)
         {
@@ -33,30 +36,14 @@ namespace ATI.Services.RabbitMQ
                     taskCompletionSource)>();
         }
 
-        internal void EnsureInitialized(IConnection connection, TimeSpan timeout)
-        {
-            if (_initialized)
-            {
-                return;
-            }
-
-            lock (_lock)
-            {
-                if (_initialized)
-                {
-                    return;
-                }
-
-                _logger.Warn($"Не зарегистрирован заранее продьюсер с ExchangeName: {ExchangeName}");
-                Init(connection, timeout);
-            }
-        }
-
         public void Init(IConnection connection, TimeSpan timeout)
         {
+            if (_initialized)
+                return;
+
             _defaultTimeout = timeout;
             _channel = connection.CreateModel();
-            _channel.ExchangeDeclare(exchange: ExchangeName, type: GetExchangeType(), durable: DurableExchange);
+            _channel.ExchangeDeclare(ExchangeName, GetExchangeType(), DurableExchange);
             _channel.ConfirmSelect();
             _channel.BasicNacks += (_, _) =>
                 _logger.Error(
@@ -98,17 +85,17 @@ namespace ATI.Services.RabbitMQ
         public async Task<bool> PublishBytesAsync(byte[] body, CancellationToken token, string routingKey = null,
             TimeSpan timeout = default, TimeSpan expiration = default)
         {
-            if (timeout == default)
-            {
-                timeout = _defaultTimeout;
-            }
-
             using var cts = new CancellationTokenSource();
             var taskCompletionSource =
                 new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancellationToken = token.CanBeCanceled
                 ? CancellationTokenSource.CreateLinkedTokenSource(cts.Token, token).Token
                 : cts.Token;
+
+            if (timeout == default)
+            {
+                timeout = _defaultTimeout;
+            }
 
             var timeoutTask = Task.Delay(timeout, cancellationToken);
 

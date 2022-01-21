@@ -8,6 +8,8 @@ using System.Threading.Tasks;
 using ATI.Services.Common.Initializers;
 using ATI.Services.Common.Initializers.Interfaces;
 using ATI.Services.Common.Logging;
+using ATI.Services.RabbitMQ.Consumers;
+using ATI.Services.RabbitMQ.Producers;
 using ATI.Services.Serialization;
 using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,13 +29,12 @@ namespace ATI.Services.RabbitMQ
         private IConnection _connection;
         private readonly IServiceProvider _serviceProvider;
 
-        private readonly ConcurrentDictionary<string, InternalRmqProducer> _customRmqProducers =
-            new ConcurrentDictionary<string, InternalRmqProducer>();
+        private readonly ConcurrentDictionary<string, RmqProducer> _customRmqProducers =
+            new ConcurrentDictionary<string, RmqProducer>();
 
         private readonly ConcurrentBag<IRmqConsumer> _customRmqConsumers = new ConcurrentBag<IRmqConsumer>();
 
-        private readonly object _initializationLock = new();
-        private bool _initialized;
+        private readonly object _initializationLock = new object();
 
         public RmqConnection(IOptions<RmqConnectionConfig> config,
             IServiceProvider serviceProvider)
@@ -42,38 +43,21 @@ namespace ATI.Services.RabbitMQ
             _config = config.Value;
         }
 
-        public void Init()
-        {
-            if (_initialized)
-            {
-                return;
-            }
-
-            lock (_initializationLock)
-            {
-                if (_initialized)
-                {
-                    return;
-                }
-
-                var producers = _serviceProvider.GetServices<IRmqProducer>();
-                var consumers = _serviceProvider.GetServices<IRmqConsumer>();
-
-                Init(producers.Concat(_customRmqProducers.Values), consumers.Concat(_customRmqConsumers));
-                _initialized = true;
-            }
-        }
-
         public void RegisterProducer(
             string exchangeName,
             string defaultRoutingKey,
             ISerializer serializer,
             bool durable = true,
-            ExchangeType exchangeType = ExchangeType.Topic)
+            ExchangeType exchangeType = ExchangeType.Topic,
+            TimeSpan timeout = default)
         {
-            var producer = new InternalRmqProducer(_logger, exchangeType, serializer, exchangeName, defaultRoutingKey,
-                durable);
+            var producer = new RmqProducer(_logger, exchangeType, serializer, exchangeName, defaultRoutingKey, durable);
             _customRmqProducers.GetOrAdd(exchangeName, producer);
+
+            lock (_initializationLock)
+            {
+                producer.Init(_connection, timeout == default ? _config.PublishMessageTimeout : timeout);
+            }
         }
 
         public Task PublishBytesAsync(
@@ -91,17 +75,8 @@ namespace ATI.Services.RabbitMQ
                 timeout = _config.PublishMessageTimeout;
             }
 
-            // Проверяем, что создан
-            var producer = _customRmqProducers.GetOrAdd(exchangeName, _ =>
-            {
-                var serializer = NewtonsoftJsonSerializer.SnakeCase;
-                return new InternalRmqProducer(_logger, exchangeType, serializer, exchangeName, routingKey, durable);
-            });
+            var producer = _customRmqProducers[exchangeName];
 
-            // Проверяем, что заиничен
-            producer.EnsureInitialized(_connection, timeout);
-
-            // отправляем
             return producer.PublishBytesAsync(publishBody, cancellationToken, routingKey, timeout, expiration);
         }
 
@@ -121,17 +96,8 @@ namespace ATI.Services.RabbitMQ
                 timeout = _config.PublishMessageTimeout;
             }
 
-            // Проверяем, что создан
-            var producer = _customRmqProducers.GetOrAdd(exchangeName, _ =>
-            {
-                serializer ??= NewtonsoftJsonSerializer.SnakeCase;
-                return new InternalRmqProducer(_logger, exchangeType, serializer, exchangeName, routingKey, durable);
-            });
+            var producer = _customRmqProducers[exchangeName];
 
-            // Проверяем, что заиничен
-            producer.EnsureInitialized(_connection, timeout);
-
-            // отправляем
             return producer.PublishAsync(publishBody, cancellationToken, routingKey, timeout, expiration);
         }
 
@@ -146,63 +112,35 @@ namespace ATI.Services.RabbitMQ
             ISerializer serializer = default)
         {
             serializer ??= NewtonsoftJsonSerializer.SnakeCase;
-            var consumer = new InternalRmqConsumer<T>(
+            var consumer = new RmqConsumer<T>(
                 _logger, onReceivedAsync, exchangeType, exchangeName, routingKey, serializer, queueName, autoDelete,
                 durable);
 
             lock (_initializationLock)
             {
                 _customRmqConsumers.Add(consumer);
-                if (_initialized)
-                {
-                    consumer.Init(_connection);
-                }
+                consumer.Init(_connection);
             }
         }
 
-        private void Init(IEnumerable<IRmqProducer> producers, IEnumerable<IRmqConsumer> consumers)
+        public void SubscribeRaw(
+            string exchangeName,
+            string queueName,
+            string routingKey,
+            Func<byte[], Task> onReceivedAsync,
+            bool autoDelete,
+            bool durable = true,
+            ExchangeType exchangeType = ExchangeType.Topic)
         {
-            var factory = new ConnectionFactory
+            var consumer = new RawRmqConsumer(
+                _logger, onReceivedAsync, exchangeType, exchangeName, routingKey, queueName, autoDelete,
+                durable);
+
+            lock (_initializationLock)
             {
-                AutomaticRecoveryEnabled = true,
-                DispatchConsumersAsync = true
-            };
-
-            var connectionUri = new Uri(_config.ConnectionString);
-            FillUserInfo(connectionUri, factory);
-
-            var amqpTcpEndpoints = GetAmqpTcpEndpoints(connectionUri);
-            _connection = factory.CreateConnection(amqpTcpEndpoints);
-
-            foreach (var producer in producers)
-            {
-                producer.Init(_connection, _config.PublishMessageTimeout);
-            }
-
-            foreach (var consumer in consumers)
-            {
+                _customRmqConsumers.Add(consumer);
                 consumer.Init(_connection);
             }
-
-            _connection.ConnectionShutdown += (_, args) =>
-            {
-                _logger.Error($"Rmq connection shutdown. {args.ReplyText}");
-            };
-
-            _connection.CallbackException += (_, args) =>
-            {
-                _logger.Error(args.Exception, "Rmq callback exception.");
-            };
-
-            _connection.ConnectionBlocked += (_, args) =>
-            {
-                _logger.Error($"Rmq connection blocked. {args.Reason}");
-            };
-
-            _connection.ConnectionUnblocked += (obj, args) =>
-            {
-                _logger.WarnWithObject("Rmq connection unblocked", obj, args);
-            };
         }
 
         private static List<AmqpTcpEndpoint> GetAmqpTcpEndpoints(Uri connectionUri)
@@ -255,7 +193,50 @@ namespace ATI.Services.RabbitMQ
 
         public Task InitializeAsync()
         {
-            Init();
+            var producers = _serviceProvider.GetServices<IRmqProducer>();
+            var consumers = _serviceProvider.GetServices<IRmqConsumer>();
+            
+            var factory = new ConnectionFactory
+            {
+                AutomaticRecoveryEnabled = true,
+                DispatchConsumersAsync = true
+            };
+
+            var connectionUri = new Uri(_config.ConnectionString);
+            FillUserInfo(connectionUri, factory);
+
+            var amqpTcpEndpoints = GetAmqpTcpEndpoints(connectionUri);
+            var connection = factory.CreateConnection(amqpTcpEndpoints);
+
+            foreach (var producer in producers)
+            {
+                producer.Init(connection, _config.PublishMessageTimeout);
+            }
+
+            foreach (var consumer in consumers)
+            {
+                consumer.Init(connection);
+            }
+
+            connection.ConnectionShutdown += (_, args) =>
+            {
+                _logger.Error($"Rmq connection shutdown. {args.ReplyText}");
+            };
+
+            connection.CallbackException += (_, args) => { _logger.Error(args.Exception, "Rmq callback exception."); };
+
+            connection.ConnectionBlocked += (_, args) => { _logger.Error($"Rmq connection blocked. {args.Reason}"); };
+
+            connection.ConnectionUnblocked += (obj, args) =>
+            {
+                _logger.WarnWithObject("Rmq connection unblocked", obj, args);
+            };
+            
+            lock (_initializationLock)
+            {
+                _connection = connection;
+            }
+            
             return Task.CompletedTask;
         }
     }

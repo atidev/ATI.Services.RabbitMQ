@@ -1,11 +1,11 @@
 ﻿using ATI.Services.Serialization;
 using NLog;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ.Producers
 {
-    internal sealed class InternalRmqProducer : BaseRmqProducer
+    internal sealed class RmqProducer : BaseRmqProducer
     {
-        public InternalRmqProducer(
+        public RmqProducer(
             ILogger logger,
             ExchangeType exchangeType,
             ISerializer serializer,
@@ -21,7 +21,7 @@ namespace ATI.Services.RabbitMQ
         }
 
         protected override ExchangeType ExchangeType { get; }
-        protected override ISerializer Serializer { get; }
+        private ISerializer Serializer { get; }
         protected override string ExchangeName { get; }
         protected override string DefaultRoutingKey { get; }
         protected override bool DurableExchange { get; }
