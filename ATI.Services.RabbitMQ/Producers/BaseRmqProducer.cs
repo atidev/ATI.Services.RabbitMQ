@@ -24,7 +24,7 @@ namespace ATI.Services.RabbitMQ.Producers
         private readonly ILogger _logger;
         protected abstract string DefaultRoutingKey { get; }
         private bool _initialized;
-        private ISerializer Serializer { get; }
+        protected abstract ISerializer Serializer { get; }
         private readonly object _lock = new object();
 
 

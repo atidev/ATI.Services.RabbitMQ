@@ -21,7 +21,7 @@ namespace ATI.Services.RabbitMQ.Producers
         }
 
         protected override ExchangeType ExchangeType { get; }
-        private ISerializer Serializer { get; }
+        protected override ISerializer Serializer { get; }
         protected override string ExchangeName { get; }
         protected override string DefaultRoutingKey { get; }
         protected override bool DurableExchange { get; }
