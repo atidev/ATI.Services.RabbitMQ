@@ -60,7 +60,7 @@ namespace ATI.Services.RabbitMQ.Producers
 
         public void PublishBytesAndForget(byte[] body, string routingKey = null, TimeSpan expiration = default)
         {
-            AddMessageToQueue(body, routingKey, expiration, CancellationToken.None);
+            AddBytesToQueue(body, routingKey, expiration, CancellationToken.None);
         }
 
         public Task<bool> PublishAsync<T>(T model, string routingKey = null, TimeSpan timeout = default,
@@ -99,7 +99,7 @@ namespace ATI.Services.RabbitMQ.Producers
 
             var timeoutTask = Task.Delay(timeout, cancellationToken);
 
-            AddMessageToQueue(body, routingKey, expiration, cancellationToken, taskCompletionSource);
+            AddBytesToQueue(body, routingKey, expiration, cancellationToken, taskCompletionSource);
 
             var resultTask = await Task.WhenAny(taskCompletionSource.Task, timeoutTask).ConfigureAwait(false);
             if (resultTask == timeoutTask)
