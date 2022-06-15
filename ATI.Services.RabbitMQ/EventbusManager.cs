@@ -332,7 +332,7 @@ namespace ATI.Services.RabbitMQ
 
         public string InitEndConsoleMessage()
         {
-            return $"End Eventbus initializer";
+            return "End Eventbus initializer";
         }
     }
 }
