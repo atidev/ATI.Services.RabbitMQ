@@ -182,11 +182,11 @@ namespace ATI.Services.RabbitMQ
                 {
                     AppId = ServiceVariables.ServiceAsClientName
                 };
-                
+
                 string flowAcceptLang;
                 if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
                     messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
-                
+
                 var exchange = new Exchange(exchangeName);
                 var bodySerializer = serializer ?? _jsonSerializer;
                 var body = bodySerializer.ToJsonBytes(publishObject);
@@ -236,7 +236,9 @@ namespace ATI.Services.RabbitMQ
                             {
                                 RabbitAcceptLanguage = acceptLanguageStr
                             };
-                        CultureInfo.CurrentUICulture = LocaleHelper.GetFromString(acceptLanguageStr);
+                        
+                        if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                            CultureInfo.CurrentUICulture = cultureInfo;
                     }
 
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
@@ -324,7 +326,7 @@ namespace ATI.Services.RabbitMQ
 
             _busClient?.Dispose();
         }
-        
+
         public string InitStartConsoleMessage()
         {
             return "Start Eventbus initializer";
