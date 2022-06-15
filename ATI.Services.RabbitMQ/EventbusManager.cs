@@ -236,7 +236,7 @@ namespace ATI.Services.RabbitMQ
                             {
                                 RabbitAcceptLanguage = acceptLanguageStr
                             };
-                        CultureInfo.CurrentCulture = LocaleHelper.GetFromString(acceptLanguageStr);
+                        CultureInfo.CurrentUICulture = LocaleHelper.GetFromString(acceptLanguageStr);
                     }
 
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
