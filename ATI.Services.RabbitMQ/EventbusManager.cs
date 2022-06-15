@@ -236,7 +236,7 @@ namespace ATI.Services.RabbitMQ
                             {
                                 RabbitAcceptLanguage = acceptLanguageStr
                             };
-                        CultureInfo.CurrentCulture = LocalizationHelper.GetFromString(acceptLanguageStr);
+                        CultureInfo.CurrentCulture = LocaleHelper.GetFromString(acceptLanguageStr);
                     }
 
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
@@ -323,6 +323,16 @@ namespace ATI.Services.RabbitMQ
             }
 
             _busClient?.Dispose();
+        }
+        
+        public string InitStartConsoleMessage()
+        {
+            return "Start Eventbus initializer";
+        }
+
+        public string InitEndConsoleMessage()
+        {
+            return $"End Eventbus initializer";
         }
     }
 }
