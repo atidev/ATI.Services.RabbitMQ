@@ -230,7 +230,7 @@ namespace ATI.Services.RabbitMQ
                 {
                     if (props.HeadersPresent && props.Headers.TryGetValue("accept_language", out var acceptLanguage))
                     {
-                        var acceptLanguageStr = acceptLanguage.ToString();
+                        var acceptLanguageStr = BodyEncoding.GetString((byte [])acceptLanguage);
                         FlowContext<RequestMetaData>.Current =
                             new RequestMetaData
                             {
