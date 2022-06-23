@@ -1,14 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using ATI.Services.Common.Context;
 using ATI.Services.Common.Extensions;
 using ATI.Services.Common.Initializers;
 using ATI.Services.Common.Initializers.Interfaces;
+using ATI.Services.Common.Localization;
 using ATI.Services.Common.Logging;
 using ATI.Services.Common.Metrics;
-using ATI.Services.Common.ServiceVariables;
+using ATI.Services.Common.Variables;
 using EasyNetQ;
 using EasyNetQ.Topology;
 using JetBrains.Annotations;
@@ -38,6 +41,8 @@ namespace ATI.Services.RabbitMQ
         private readonly Policy _subscribePolicy;
         private readonly EventbusOptions _options;
         private static readonly UTF8Encoding BodyEncoding = new(false);
+
+        private const string AcceptLangHeaderName = "accept_language";
 
         public EventbusManager(JsonSerializer jsonSerializer,
             IOptions<EventbusOptions> options)
@@ -99,6 +104,7 @@ namespace ATI.Services.RabbitMQ
             {
                 _logger.Error(exception);
             }
+
             return Task.CompletedTask;
         }
 
@@ -120,7 +126,8 @@ namespace ATI.Services.RabbitMQ
             string routingKey,
             string metricEntity,
             bool mandatory = false,
-            TimeSpan? timeout = null)
+            TimeSpan? timeout = null,
+            bool withAcceptLang = true)
         {
             if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
                 string.IsNullOrWhiteSpace(publishBody))
@@ -128,8 +135,14 @@ namespace ATI.Services.RabbitMQ
 
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
-                var messageProperties = new MessageProperties();
-                messageProperties.AppId = ServiceVariables.ServiceAsClientName;
+                var messageProperties = new MessageProperties
+                {
+                    AppId = ServiceVariables.ServiceAsClientName
+                };
+                string flowAcceptLang;
+                if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
+                    messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
+
                 var exchange = new Exchange(exchangeName);
                 var body = BodyEncoding.GetBytes(publishBody);
 
@@ -144,7 +157,7 @@ namespace ATI.Services.RabbitMQ
                 if (sendingResult.FinalException != null)
                 {
                     _logger.ErrorWithObject(sendingResult.FinalException,
-                        new {publishBody, exchangeName, routingKey, metricEntity, mandatory});
+                        new { publishBody, exchangeName, routingKey, metricEntity, mandatory });
                 }
             }
         }
@@ -156,7 +169,8 @@ namespace ATI.Services.RabbitMQ
             string metricEntity,
             bool mandatory = false,
             JsonSerializer serializer = null,
-            TimeSpan? timeout = null)
+            TimeSpan? timeout = null,
+            bool withAcceptLang = true)
         {
             if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
                 publishObject == null)
@@ -164,8 +178,15 @@ namespace ATI.Services.RabbitMQ
 
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
-                var messageProperties = new MessageProperties();
-                messageProperties.AppId = ServiceVariables.ServiceAsClientName;
+                var messageProperties = new MessageProperties
+                {
+                    AppId = ServiceVariables.ServiceAsClientName
+                };
+
+                string flowAcceptLang;
+                if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
+                    messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
+
                 var exchange = new Exchange(exchangeName);
                 var bodySerializer = serializer ?? _jsonSerializer;
                 var body = bodySerializer.ToJsonBytes(publishObject);
@@ -181,7 +202,7 @@ namespace ATI.Services.RabbitMQ
                 if (sendingResult.FinalException != null)
                 {
                     _logger.ErrorWithObject(sendingResult.FinalException,
-                        new {publishObject, exchangeName, routingKey, metricEntity, mandatory});
+                        new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
                 }
             }
         }
@@ -206,7 +227,22 @@ namespace ATI.Services.RabbitMQ
                 MessageReceivedInfo info)
             {
                 using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
+                {
+                    if (props.HeadersPresent && props.Headers.TryGetValue("accept_language", out var acceptLanguage))
+                    {
+                        var acceptLanguageStr = BodyEncoding.GetString((byte [])acceptLanguage);
+                        FlowContext<RequestMetaData>.Current =
+                            new RequestMetaData
+                            {
+                                RabbitAcceptLanguage = acceptLanguageStr
+                            };
+                        
+                        if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                            CultureInfo.CurrentUICulture = cultureInfo;
+                    }
+
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
+                }
             }
         }
 
@@ -261,7 +297,7 @@ namespace ATI.Services.RabbitMQ
                     retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
                     (exception, timeSpan, retryCount, _) =>
                     {
-                        _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
+                        _logger.ErrorWithObject(exception, new { TimeSpan = timeSpan, RetryCount = retryCount });
                     });
 
             var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
@@ -289,6 +325,16 @@ namespace ATI.Services.RabbitMQ
             }
 
             _busClient?.Dispose();
+        }
+
+        public string InitStartConsoleMessage()
+        {
+            return "Start Eventbus initializer";
+        }
+
+        public string InitEndConsoleMessage()
+        {
+            return "End Eventbus initializer";
         }
     }
 }
