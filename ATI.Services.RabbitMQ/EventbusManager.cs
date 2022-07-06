@@ -126,6 +126,7 @@ namespace ATI.Services.RabbitMQ
             string exchangeName,
             string routingKey,
             string metricEntity,
+            Dictionary<string, object> additionalHeaders = null,
             bool mandatory = false,
             TimeSpan? timeout = null,
             bool withAcceptLang = true)
@@ -136,14 +137,7 @@ namespace ATI.Services.RabbitMQ
 
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
-                var messageProperties = new MessageProperties
-                {
-                    AppId = ServiceVariables.ServiceAsClientName
-                };
-                string flowAcceptLang;
-                if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
-                    messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
-
+                var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
                 var exchange = new Exchange(exchangeName);
                 var body = BodyEncoding.GetBytes(publishBody);
 
@@ -168,6 +162,7 @@ namespace ATI.Services.RabbitMQ
             string exchangeName,
             string routingKey,
             string metricEntity,
+            Dictionary<string, object> additionalHeaders = null,
             bool mandatory = false,
             JsonSerializer serializer = null,
             TimeSpan? timeout = null,
@@ -179,15 +174,7 @@ namespace ATI.Services.RabbitMQ
 
             using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
             {
-                var messageProperties = new MessageProperties
-                {
-                    AppId = ServiceVariables.ServiceAsClientName
-                };
-
-                string flowAcceptLang;
-                if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
-                    messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
-
+                var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
                 var exchange = new Exchange(exchangeName);
                 var bodySerializer = serializer ?? _jsonSerializer;
                 var body = bodySerializer.ToJsonBytes(publishObject);
@@ -206,6 +193,26 @@ namespace ATI.Services.RabbitMQ
                         new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
                 }
             }
+        }
+
+        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
+        {
+            var messageProperties = new MessageProperties
+            {
+                AppId = ServiceVariables.ServiceAsClientName
+            };
+
+            string flowAcceptLang;
+            if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
+                messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
+
+            if (additionalHeaders != null)
+                foreach (var additionalHeader in additionalHeaders)
+                {
+                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
+                }
+
+            return messageProperties;
         }
 
         private async Task SubscribePrivateAsync(
@@ -231,13 +238,13 @@ namespace ATI.Services.RabbitMQ
                 {
                     if (props.HeadersPresent && props.Headers.TryGetValue("accept_language", out var acceptLanguage))
                     {
-                        var acceptLanguageStr = BodyEncoding.GetString((byte [])acceptLanguage);
+                        var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
                         FlowContext<RequestMetaData>.Current =
                             new RequestMetaData
                             {
                                 RabbitAcceptLanguage = acceptLanguageStr
                             };
-                        
+
                         if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
                             CultureInfo.CurrentUICulture = cultureInfo;
                     }
