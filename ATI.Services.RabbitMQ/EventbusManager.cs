@@ -18,6 +18,7 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Options;
 using NLog;
 using Polly;
+using Polly.Retry;
 using Polly.Wrap;
 using JsonSerializer = Newtonsoft.Json.JsonSerializer;
 
@@ -37,8 +38,8 @@ namespace ATI.Services.RabbitMQ
 
         private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
         private List<SubscriptionInfo> _exclusiveSubscriptions = new();
-        private readonly Policy _retryForeverPolicy;
-        private readonly Policy _subscribePolicy;
+        private readonly AsyncRetryPolicy _retryForeverPolicy;
+        private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
         private static readonly UTF8Encoding BodyEncoding = new(false);
 
@@ -308,7 +309,7 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
-        private PolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
             Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
                 Policy.Handle<Exception>()
                     .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
