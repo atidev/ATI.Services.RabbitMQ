@@ -13,6 +13,7 @@ using ATI.Services.Common.Logging;
 using ATI.Services.Common.Metrics;
 using ATI.Services.Common.Variables;
 using EasyNetQ;
+using EasyNetQ.DI;
 using EasyNetQ.Topology;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Options;
@@ -109,12 +110,12 @@ namespace ATI.Services.RabbitMQ
             return Task.CompletedTask;
         }
 
-        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName)
+        public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName)
         {
             return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic);
         }
 
-        public Task<IExchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
+        public Task<Exchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
         {
             var tasks = exchangeNames.Select(exchangeName =>
                 _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic));
@@ -226,12 +227,12 @@ namespace ATI.Services.RabbitMQ
             var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
                 durable: durable,
                 exclusive: bindingInfo.Queue.IsExclusive);
-            _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+            await _busClient.BindAsync(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
             _busClient.Consume(queue,
                 async (body, props, info) =>
                     await HandleEventBusMessageWithPolicy(body, props, info));
 
-            async Task HandleEventBusMessageWithPolicy(byte[] body, MessageProperties props,
+            async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props,
                 MessageReceivedInfo info)
             {
                 using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
@@ -249,7 +250,7 @@ namespace ATI.Services.RabbitMQ
                             CultureInfo.CurrentUICulture = cultureInfo;
                     }
 
-                    await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
+                    await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
                 }
             }
         }
@@ -328,7 +329,7 @@ namespace ATI.Services.RabbitMQ
             {
                 foreach (var queue in RabbitMqDeclaredQueues.DeclaredQueues)
                 {
-                    _busClient.QueueDelete(queue);
+                    _busClient.QueueDelete(queue.Name);
                 }
             }
 
