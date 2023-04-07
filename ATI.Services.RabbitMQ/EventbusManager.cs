@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 using ATI.Services.Common.Context;
@@ -201,18 +203,61 @@ namespace ATI.Services.RabbitMQ
             {
                 AppId = ServiceVariables.ServiceAsClientName
             };
-
-            string flowAcceptLang;
-            if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
-                messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
+            
+            SetTraceHeadersFromActivity(messageProperties);
+            if (withAcceptLang)
+                SetAcceptLanguageHeader(messageProperties);
 
             if (additionalHeaders != null)
+            {
                 foreach (var additionalHeader in additionalHeaders)
                 {
                     messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
                 }
+            }
 
             return messageProperties;
+        }
+        
+        public void SetTraceHeadersFromActivity(MessageProperties properties)
+        {
+            if (Activity.Current == null)
+                return;
+
+            if (Activity.Current is not { Baggage: { } bgg })
+                return;
+
+            var baggageArray = bgg.ToArray();
+            if (baggageArray is not { Length: > 0 })
+                return;
+
+            var baggageProperties = baggageArray
+                .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
+
+            properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
+        }
+        
+        public void SetAcceptLanguageHeader(MessageProperties properties)
+        {
+            var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
+            if (flowAcceptLang != null)
+                properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
+        }
+
+        private void GetAcceptLanguageFromProperties(MessageProperties props)
+        {
+            if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
+                return;
+
+            var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
+            FlowContext<RequestMetaData>.Current =
+                new RequestMetaData
+                {
+                    RabbitAcceptLanguage = acceptLanguageStr
+                };
+
+            if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                CultureInfo.CurrentUICulture = cultureInfo;
         }
 
         private async Task SubscribePrivateAsync(
@@ -236,24 +281,20 @@ namespace ATI.Services.RabbitMQ
             {
                 using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
                 {
-                    if (props.HeadersPresent && props.Headers.TryGetValue("accept_language", out var acceptLanguage))
-                    {
-                        var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
-                        FlowContext<RequestMetaData>.Current =
-                            new RequestMetaData
-                            {
-                                RabbitAcceptLanguage = acceptLanguageStr
-                            };
-
-                        if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
-                            CultureInfo.CurrentUICulture = cultureInfo;
-                    }
-
+                    HandleMessageProps(props);
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
                 }
             }
         }
 
+        private void HandleMessageProps(MessageProperties props)
+        {
+            if (!props.HeadersPresent) 
+                return;
+
+            GetAcceptLanguageFromProperties(props);
+        }
+        
         public async Task SubscribeAsync(
             QueueExchangeBinding bindingInfo,
             bool durable,
