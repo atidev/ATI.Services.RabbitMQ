@@ -35,8 +35,8 @@ namespace ATI.Services.RabbitMQ
         private readonly JsonSerializer _jsonSerializer;
         private readonly string _connectionString;
 
-        private readonly MetricsTracingFactory _metricsTracingFactory =
-            MetricsTracingFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
+        private readonly MetricsFactory _metricsTracingFactory =
+            MetricsFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
 
         private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
         private List<SubscriptionInfo> _exclusiveSubscriptions = new();
