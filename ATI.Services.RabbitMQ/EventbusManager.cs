@@ -228,7 +228,7 @@ namespace ATI.Services.RabbitMQ
                 return;
 
             var baggageArray = bgg.ToArray();
-            if (baggageArray is not { Length: > 0 })
+            if (baggageArray.Length == 0)
                 return;
 
             var baggageProperties = baggageArray
