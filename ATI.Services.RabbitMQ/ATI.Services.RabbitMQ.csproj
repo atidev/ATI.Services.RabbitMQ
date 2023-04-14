@@ -17,7 +17,7 @@
     <NoWarn>1701;1702;CS1591;CS1571;CS1573;CS1574</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="atisu.services.common" Version="10.0.3" />
+    <PackageReference Include="atisu.services.common" Version="12.1.1-rc2" />
     <PackageReference Include="EasyNetQ" Version="6.3.1" />
   </ItemGroup>
 </Project>
