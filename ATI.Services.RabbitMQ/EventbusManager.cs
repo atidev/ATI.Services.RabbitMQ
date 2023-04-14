@@ -69,26 +69,6 @@ namespace ATI.Services.RabbitMQ
                         (exception, _) => _logger.ErrorWithObject(exception, _exclusiveSubscriptions));
         }
 
-        private async Task ResubscribeOnReconnect()
-        {
-            try
-            {
-                foreach (var subscription in _exclusiveSubscriptions)
-                {
-                    await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
-                        subscription.Binding,
-                        subscription.Durable,
-                        subscription.AutoDelete,
-                        subscription.EventbusSubscriptionHandler,
-                        subscription.MetricsEntity));
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.ErrorWithObject(e, _exclusiveSubscriptions);
-            }
-        }
-
         public Task InitializeAsync()
         {
             try
@@ -197,104 +177,6 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
-        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
-        {
-            var messageProperties = new MessageProperties
-            {
-                AppId = ServiceVariables.ServiceAsClientName
-            };
-            
-            SetTraceHeadersFromActivity(messageProperties);
-            if (withAcceptLang)
-                SetAcceptLanguageHeader(messageProperties);
-
-            if (additionalHeaders != null)
-            {
-                foreach (var additionalHeader in additionalHeaders)
-                {
-                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
-                }
-            }
-
-            return messageProperties;
-        }
-        
-        public void SetTraceHeadersFromActivity(MessageProperties properties)
-        {
-            if (Activity.Current == null)
-                return;
-
-            if (Activity.Current is not { Baggage: { } bgg })
-                return;
-
-            var baggageArray = bgg.ToArray();
-            if (baggageArray.Length == 0)
-                return;
-
-            var baggageProperties = baggageArray
-                .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
-
-            properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
-        }
-        
-        public void SetAcceptLanguageHeader(MessageProperties properties)
-        {
-            var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
-            if (flowAcceptLang != null)
-                properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
-        }
-
-        private void GetAcceptLanguageFromProperties(MessageProperties props)
-        {
-            if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
-                return;
-
-            var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
-            FlowContext<RequestMetaData>.Current =
-                new RequestMetaData
-                {
-                    RabbitAcceptLanguage = acceptLanguageStr
-                };
-
-            if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
-                CultureInfo.CurrentUICulture = cultureInfo;
-        }
-
-        private async Task SubscribePrivateAsync(
-            QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-            string metricEntity)
-        {
-            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
-            var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
-                durable: durable,
-                exclusive: bindingInfo.Queue.IsExclusive);
-            _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
-            _busClient.Consume(queue,
-                async (body, props, info) =>
-                    await HandleEventBusMessageWithPolicy(body, props, info));
-
-            async Task HandleEventBusMessageWithPolicy(byte[] body, MessageProperties props,
-                MessageReceivedInfo info)
-            {
-                using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
-                {
-                    HandleMessageProps(props);
-                    await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
-                }
-            }
-        }
-
-        private void HandleMessageProps(MessageProperties props)
-        {
-            if (!props.HeadersPresent) 
-                return;
-
-            GetAcceptLanguageFromProperties(props);
-        }
-        
         public async Task SubscribeAsync(
             QueueExchangeBinding bindingInfo,
             bool durable,
@@ -337,6 +219,20 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
+        public string InitStartConsoleMessage()
+        {
+            return "Start Eventbus initializer";
+        }
+
+        public string InitEndConsoleMessage()
+        {
+            return "End Eventbus initializer";
+        }
+
+        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+            Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
+                Policy.Handle<Exception>()
+                    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
 
         private async Task ExecuteWithPolicy(Func<Task> action)
         {
@@ -357,10 +253,120 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
-        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
-            Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
-                Policy.Handle<Exception>()
-                    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
+        private async Task ResubscribeOnReconnect()
+        {
+            try
+            {
+                foreach (var subscription in _exclusiveSubscriptions)
+                {
+                    await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
+                        subscription.Binding,
+                        subscription.Durable,
+                        subscription.AutoDelete,
+                        subscription.EventbusSubscriptionHandler,
+                        subscription.MetricsEntity));
+                }
+            }
+            catch (Exception e)
+            {
+                _logger.ErrorWithObject(e, _exclusiveSubscriptions);
+            }
+        }
+
+        private async Task SubscribePrivateAsync(
+            QueueExchangeBinding bindingInfo,
+            bool durable,
+            bool autoDelete,
+            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+            string metricEntity)
+        {
+            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
+            var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
+                durable: durable,
+                exclusive: bindingInfo.Queue.IsExclusive);
+            _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+            _busClient.Consume(queue,
+                async (body, props, info) =>
+                    await HandleEventBusMessageWithPolicy(body, props, info));
+
+            async Task HandleEventBusMessageWithPolicy(byte[] body, MessageProperties props,
+                MessageReceivedInfo info)
+            {
+                using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
+                {
+                    HandleMessageProps(props);
+                    await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
+                }
+            }
+        }
+
+        private void HandleMessageProps(MessageProperties props)
+        {
+            if (!props.HeadersPresent)
+                return;
+
+            GetAcceptLanguageFromProperties(props);
+        }
+
+        private void GetAcceptLanguageFromProperties(MessageProperties props)
+        {
+            if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
+                return;
+
+            var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
+            FlowContext<RequestMetaData>.Current =
+                new RequestMetaData
+                {
+                    RabbitAcceptLanguage = acceptLanguageStr
+                };
+
+            if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                CultureInfo.CurrentUICulture = cultureInfo;
+        }
+
+        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
+        {
+            var messageProperties = new MessageProperties
+            {
+                AppId = ServiceVariables.ServiceAsClientName
+            };
+
+            SetTraceHeadersFromActivity(messageProperties);
+            if (withAcceptLang)
+                SetAcceptLanguageHeader(messageProperties);
+
+            if (additionalHeaders != null)
+            {
+                foreach (var additionalHeader in additionalHeaders)
+                {
+                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
+                }
+            }
+
+            return messageProperties;
+        }
+
+        private void SetTraceHeadersFromActivity(MessageProperties properties)
+        {
+            if (Activity.Current is not { Baggage: { } bgg })
+                return;
+
+            var baggageArray = bgg.ToArray();
+            if (baggageArray.Length == 0)
+                return;
+
+            var baggageProperties = baggageArray
+                .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
+
+            properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
+        }
+
+        private void SetAcceptLanguageHeader(MessageProperties properties)
+        {
+            var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
+            if (flowAcceptLang != null)
+                properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
+        }
 
         public void Dispose()
         {
@@ -374,16 +380,6 @@ namespace ATI.Services.RabbitMQ
             }
 
             _busClient?.Dispose();
-        }
-
-        public string InitStartConsoleMessage()
-        {
-            return "Start Eventbus initializer";
-        }
-
-        public string InitEndConsoleMessage()
-        {
-            return "End Eventbus initializer";
         }
     }
 }
