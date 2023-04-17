@@ -91,9 +91,10 @@ namespace ATI.Services.RabbitMQ
             return Task.CompletedTask;
         }
 
-        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName)
+        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName, bool durable = true,
+            bool autoDelete = false)
         {
-            return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic);
+            return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
         }
 
         public Task<IExchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
