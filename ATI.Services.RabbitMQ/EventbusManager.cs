@@ -257,7 +257,7 @@ namespace ATI.Services.RabbitMQ
         {
             var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
                 bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
-            
+
             var queue = await _busClient.QueueDeclareAsync(
                 name: bindingInfo.Queue.Name,
                 autoDelete: bindingInfo.Queue.IsAutoDelete,
