@@ -207,7 +207,7 @@ namespace ATI.Services.RabbitMQ
                     await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
         }
-        
+
         private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
             Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
                 Policy.Handle<Exception>()
@@ -255,7 +255,9 @@ namespace ATI.Services.RabbitMQ
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity)
         {
-            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
+            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
+                bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
+            
             var queue = await _busClient.QueueDeclareAsync(
                 name: bindingInfo.Queue.Name,
                 autoDelete: bindingInfo.Queue.IsAutoDelete,
@@ -358,6 +360,7 @@ namespace ATI.Services.RabbitMQ
 
             _busClient?.Dispose();
         }
+
         public string InitStartConsoleMessage()
         {
             return "Start Eventbus initializer";
@@ -367,6 +370,5 @@ namespace ATI.Services.RabbitMQ
         {
             return "End Eventbus initializer";
         }
-
     }
 }
