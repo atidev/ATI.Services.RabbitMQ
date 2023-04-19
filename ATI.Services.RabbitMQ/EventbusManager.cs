@@ -31,7 +31,7 @@ namespace ATI.Services.RabbitMQ
     public class EventbusManager : IDisposable, IInitializer
     {
         private IAdvancedBus _busClient;
-        private const int RetryAttemptMax = 4;
+        private const int RetryAttemptMax = 3;
         private readonly JsonSerializer _jsonSerializer;
         private readonly string _connectionString;
 
@@ -91,17 +91,9 @@ namespace ATI.Services.RabbitMQ
             return Task.CompletedTask;
         }
 
-        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName, bool durable = true,
-            bool autoDelete = false)
+        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete)
         {
             return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
-        }
-
-        public Task<IExchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
-        {
-            var tasks = exchangeNames.Select(exchangeName =>
-                _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic));
-            return Task.WhenAll(tasks);
         }
 
         public async Task PublishRawAsync(
@@ -215,17 +207,7 @@ namespace ATI.Services.RabbitMQ
                     await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
         }
-
-        public string InitStartConsoleMessage()
-        {
-            return "Start Eventbus initializer";
-        }
-
-        public string InitEndConsoleMessage()
-        {
-            return "End Eventbus initializer";
-        }
-
+        
         private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
             Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
                 Policy.Handle<Exception>()
@@ -376,5 +358,15 @@ namespace ATI.Services.RabbitMQ
 
             _busClient?.Dispose();
         }
+        public string InitStartConsoleMessage()
+        {
+            return "Start Eventbus initializer";
+        }
+
+        public string InitEndConsoleMessage()
+        {
+            return "End Eventbus initializer";
+        }
+
     }
 }
