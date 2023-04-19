@@ -20,6 +20,7 @@ namespace ATI.Services.RabbitMQ
             }
             
             services.AddSingleton<EventbusManager>();
+            services.AddSingleton<RmqTopology>();
         }
     }
 }

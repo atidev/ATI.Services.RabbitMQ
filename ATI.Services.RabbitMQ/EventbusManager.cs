@@ -180,8 +180,6 @@ namespace ATI.Services.RabbitMQ
 
         public async Task SubscribeAsync(
             QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity = null)
         {
@@ -190,8 +188,6 @@ namespace ATI.Services.RabbitMQ
                 _exclusiveSubscriptions.Add(new SubscriptionInfo
                 {
                     Binding = bindingInfo,
-                    Durable = durable,
-                    AutoDelete = autoDelete,
                     EventbusSubscriptionHandler = handler,
                     MetricsEntity = metricEntity
                 });
@@ -203,20 +199,20 @@ namespace ATI.Services.RabbitMQ
             {
                 try
                 {
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity);
+                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
                 }
                 // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
                 catch (Exception ex)
                 {
                     _logger.Error(ex);
                     _subscribePolicy.ExecuteAsync(async () =>
-                        await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
+                        await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
                 }
             }
             else
             {
                 _subscribePolicy.ExecuteAsync(async () =>
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
+                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
         }
 
@@ -262,8 +258,6 @@ namespace ATI.Services.RabbitMQ
                 {
                     await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
                         subscription.Binding,
-                        subscription.Durable,
-                        subscription.AutoDelete,
                         subscription.EventbusSubscriptionHandler,
                         subscription.MetricsEntity));
                 }
@@ -276,14 +270,14 @@ namespace ATI.Services.RabbitMQ
 
         private async Task SubscribePrivateAsync(
             QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity)
         {
             var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
-            var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
-                durable: durable,
+            var queue = await _busClient.QueueDeclareAsync(
+                name: bindingInfo.Queue.Name,
+                autoDelete: bindingInfo.Queue.IsAutoDelete,
+                durable: bindingInfo.Queue.IsDurable,
                 exclusive: bindingInfo.Queue.IsExclusive);
             _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
             _busClient.Consume(queue,
