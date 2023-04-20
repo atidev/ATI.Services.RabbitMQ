@@ -44,15 +44,17 @@ namespace ATI.Services.RabbitMQ
         private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
         private static readonly UTF8Encoding BodyEncoding = new(false);
+        private readonly RmqTopology _rmqTopology;
 
         private const string AcceptLangHeaderName = "accept_language";
 
         public EventbusManager(JsonSerializer jsonSerializer,
-            IOptions<EventbusOptions> options)
+            IOptions<EventbusOptions> options, RmqTopology rmqTopology)
         {
             _options = options.Value;
             _connectionString = options.Value.ConnectionString;
             _jsonSerializer = jsonSerializer;
+            _rmqTopology = rmqTopology;
 
             _subscribePolicy = Policy.Handle<Exception>()
                 .WaitAndRetryForeverAsync(
@@ -168,6 +170,22 @@ namespace ATI.Services.RabbitMQ
                         new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
                 }
             }
+        }
+
+        public Task SubscribeAsync(
+            string exchangeName,
+            string routingKey,
+            bool isExclusive,
+            bool isDurable,
+            bool isAutoDelete,
+            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+            bool isExclusiveQueueName = false,
+            string customQueueName = null,
+            string metricEntity = null)
+        {
+            var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
+                isExclusiveQueueName, customQueueName);
+            return SubscribeAsync(binding, handler, metricEntity);
         }
 
         public async Task SubscribeAsync(

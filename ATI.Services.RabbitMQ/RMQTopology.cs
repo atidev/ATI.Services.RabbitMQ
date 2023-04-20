@@ -24,15 +24,14 @@ public class RmqTopology
 
     /// <summary>
     /// </summary>
-    /// <param name="rabbitService"></param>
+    /// <param name="exchangeName"></param>
     /// <param name="routingKey"></param>
-    /// <param name="operation"></param>
     /// <param name="isExclusiveQueueName">Если true, то к имени очереди добавится постфикс с именем машины+порт</param>
     /// <param name="isExclusive"></param>
     /// <param name="customQueueName"></param>
     /// <returns></returns>
     public QueueExchangeBinding CreateBinding(
-        string rabbitService,
+        string exchangeName,
         string routingKey,
         bool isExclusive,
         bool isDurable,
@@ -41,13 +40,13 @@ public class RmqTopology
         string customQueueName = null)
     {
         var queueName =
-            EventbusQueueNameTemplate(rabbitService, routingKey, customQueueName, isExclusiveQueueName);
+            EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName);
 
         var createdQueue = new Queue(queueName, isDurable, isExclusive, isAutoDelete);
 
         var subscribeExchange = new ExchangeInfo
         {
-            Name = $"{_eventbusOptions.Environment}.{rabbitService}",
+            Name = $"{_eventbusOptions.Environment}.{exchangeName}",
             Type = ExchangeType.Topic
         };
         return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey);
