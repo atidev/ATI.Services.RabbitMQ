@@ -273,14 +273,15 @@ namespace ATI.Services.RabbitMQ
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity)
         {
-            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
-                bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
-
             var queue = await _busClient.QueueDeclareAsync(
                 name: bindingInfo.Queue.Name,
                 autoDelete: bindingInfo.Queue.IsAutoDelete,
                 durable: bindingInfo.Queue.IsDurable,
                 exclusive: bindingInfo.Queue.IsExclusive);
+            
+            var exchange = new Exchange(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
+                bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
+
             _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
             _busClient.Consume(queue,
                 async (body, props, info) =>
