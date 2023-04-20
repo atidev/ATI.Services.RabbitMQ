@@ -12,9 +12,6 @@ public class RmqTopology
 {
     private readonly EventbusOptions _eventbusOptions;
 
-    private readonly string _queuePostfixName =
-        "-" + Dns.GetHostName() + "-" + ConfigurationManager.GetApplicationPort();
-
     private const string SubscriptionType = "eventbus";
 
     public RmqTopology(IOptions<EventbusOptions> options)
@@ -46,11 +43,13 @@ public class RmqTopology
 
         var subscribeExchange = new ExchangeInfo
         {
-            Name = $"{_eventbusOptions.Environment}.{exchangeName}",
+            Name = exchangeName,
             Type = ExchangeType.Topic
         };
         return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey);
     }
+
+    private readonly string _queuePostfixName = $"-{Dns.GetHostName()}-{ConfigurationManager.GetApplicationPort()}";
 
     private string EventbusQueueNameTemplate(string rabbitService, string routingKey,
         string customQueueName, bool isExclusiveQueueName)
