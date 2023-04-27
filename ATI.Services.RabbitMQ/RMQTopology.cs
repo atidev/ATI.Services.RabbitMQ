@@ -1,80 +1,68 @@
 ﻿using System.Net;
 using ATI.Services.Common.Behaviors;
+using ATI.Services.Common.Extensions;
 using EasyNetQ.Topology;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Options;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ;
+
+[PublicAPI]
+public class RmqTopology
 {
-    [PublicAPI]
-    public class RmqTopology
+    private readonly EventbusOptions _eventbusOptions;
+
+    private const string SubscriptionType = "eventbus";
+
+    public RmqTopology(IOptions<EventbusOptions> options)
     {
-        private readonly EventbusOptions _eventbusOptions;
-        private readonly string _queuePostfixName= "-" + Dns.GetHostName() + "-" + ConfigurationManager.GetApplicationPort();
-        private const string SubscriptionType = "eventbus";
-        
-        public RmqTopology(IOptions<EventbusOptions> options)
+        _eventbusOptions = options.Value;
+    }
+
+    /// <summary>
+    /// </summary>
+    /// <param name="exchangeName"></param>
+    /// <param name="routingKey"></param>
+    /// <param name="isExclusiveQueueName">Если true, то к имени очереди добавится постфикс с именем машины+порт</param>
+    /// <param name="isExclusive"></param>
+    /// <param name="customQueueName"></param>
+    /// <returns></returns>
+    public QueueExchangeBinding CreateBinding(
+        string exchangeName,
+        string routingKey,
+        bool isExclusive,
+        bool isDurable,
+        bool isAutoDelete,
+        bool isExclusiveQueueName = false,
+        string customQueueName = null)
+    {
+        var queueName =
+            EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName);
+
+        var createdQueue = new Queue(queueName, isDurable, isExclusive, isAutoDelete);
+
+        var subscribeExchange = new ExchangeInfo
         {
-            _eventbusOptions = options.Value;
-        }
+            Name = exchangeName,
+            Type = ExchangeType.Topic
+        };
+        return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey);
+    }
 
-        /// <summary>
-        /// </summary>
-        /// <param name="rabbitService"></param>
-        /// <param name="routingKey"></param>
-        /// <param name="operation"></param>
-        /// <param name="isExclusiveQueueName">Если true, то к имени очереди добавится постфикс с именем машины+порт</param>
-        /// <param name="isExclusive"></param>
-        /// <param name="customQueueName"></param>
-        /// <returns></returns>
-        public QueueExchangeBinding CreateBinding(
-            string rabbitService,
-            string routingKey,
-            string operation = Operation.Any,
-            bool isExclusiveQueueName = false,
-            bool isExclusive = false,
-            string customQueueName = null)
-        {
-           var queueName = isExclusiveQueueName 
-                ? GetEventbusExclusiveQueueName(rabbitService, routingKey, operation, customQueueName) 
-                : EventbusQueueNameTemplate(rabbitService, routingKey, operation, customQueueName);
+    private readonly string _queuePostfixName = $"-{Dns.GetHostName()}-{ConfigurationManager.GetApplicationPort()}";
 
-            var subscribeExchange = new ExchangeInfo
-            {
-                Name = $"{_eventbusOptions.Environment}.{rabbitService}",
-                Type = ExchangeType.Topic
-            };
+    private string EventbusQueueNameTemplate(string rabbitService, string routingKey,
+        string customQueueName, bool isExclusiveQueueName)
+    {
+        var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}." +
+                        (!customQueueName.IsNullOrEmpty()
+                            ? customQueueName
+                            : $"{_eventbusOptions.ServiceName}.{rabbitService}.{routingKey}");
 
-            var createdQueue = new Queue(queueName, isExclusive);
-            return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey);
-        }
-        
-        private string GetEventbusExclusiveQueueName(string rabbitService, string exchange, string operation, string customQueueName)
-        {
-            return
-                $"{_eventbusOptions.Environment}.{SubscriptionType}." +
-                (string.IsNullOrEmpty(customQueueName)
-                    ? $"{_eventbusOptions.ServiceName}.{rabbitService}.{exchange}.{operation}{_queuePostfixName}"
-                    : $"{customQueueName}{_queuePostfixName}");
-        }
 
-        private string EventbusQueueNameTemplate(string rabbitService, string routingKey, string operation, string customQueueName)
-        {
-            var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}.";
-            if (string.IsNullOrEmpty(customQueueName))
-            {
-                queueName += $"{_eventbusOptions.ServiceName}.{rabbitService}.{routingKey}.{operation}";
-            }
-            else
-            {
-                queueName += customQueueName;
-            }
-            
-            if (_eventbusOptions.AddHostnamePostfixToQueues)
-                queueName += _queuePostfixName;
+        if (_eventbusOptions.AddHostnamePostfixToQueues || isExclusiveQueueName)
+            queueName += _queuePostfixName;
 
-            return queueName;
-        }
-        
+        return queueName;
     }
 }

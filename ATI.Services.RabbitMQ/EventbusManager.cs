@@ -31,7 +31,7 @@ namespace ATI.Services.RabbitMQ
     public class EventbusManager : IDisposable, IInitializer
     {
         private IAdvancedBus _busClient;
-        private const int RetryAttemptMax = 4;
+        private const int RetryAttemptMax = 3;
         private readonly JsonSerializer _jsonSerializer;
         private readonly string _connectionString;
 
@@ -44,15 +44,17 @@ namespace ATI.Services.RabbitMQ
         private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
         private static readonly UTF8Encoding BodyEncoding = new(false);
+        private readonly RmqTopology _rmqTopology;
 
         private const string AcceptLangHeaderName = "accept_language";
 
         public EventbusManager(JsonSerializer jsonSerializer,
-            IOptions<EventbusOptions> options)
+            IOptions<EventbusOptions> options, RmqTopology rmqTopology)
         {
             _options = options.Value;
             _connectionString = options.Value.ConnectionString;
             _jsonSerializer = jsonSerializer;
+            _rmqTopology = rmqTopology;
 
             _subscribePolicy = Policy.Handle<Exception>()
                 .WaitAndRetryForeverAsync(
@@ -91,17 +93,9 @@ namespace ATI.Services.RabbitMQ
             return Task.CompletedTask;
         }
 
-        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName, bool durable = true,
-            bool autoDelete = false)
+        public Task<IExchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete)
         {
             return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
-        }
-
-        public Task<IExchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
-        {
-            var tasks = exchangeNames.Select(exchangeName =>
-                _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic));
-            return Task.WhenAll(tasks);
         }
 
         public async Task PublishRawAsync(
@@ -178,10 +172,24 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
+        public Task SubscribeAsync(
+            string exchangeName,
+            string routingKey,
+            bool isExclusive,
+            bool isDurable,
+            bool isAutoDelete,
+            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+            bool isExclusiveQueueName = false,
+            string customQueueName = null,
+            string metricEntity = null)
+        {
+            var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
+                isExclusiveQueueName, customQueueName);
+            return SubscribeAsync(binding, handler, metricEntity);
+        }
+
         public async Task SubscribeAsync(
             QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity = null)
         {
@@ -190,8 +198,6 @@ namespace ATI.Services.RabbitMQ
                 _exclusiveSubscriptions.Add(new SubscriptionInfo
                 {
                     Binding = bindingInfo,
-                    Durable = durable,
-                    AutoDelete = autoDelete,
                     EventbusSubscriptionHandler = handler,
                     MetricsEntity = metricEntity
                 });
@@ -203,31 +209,21 @@ namespace ATI.Services.RabbitMQ
             {
                 try
                 {
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity);
+                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
                 }
                 // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
                 catch (Exception ex)
                 {
                     _logger.Error(ex);
                     _subscribePolicy.ExecuteAsync(async () =>
-                        await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
+                        await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
                 }
             }
             else
             {
                 _subscribePolicy.ExecuteAsync(async () =>
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
+                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
-        }
-
-        public string InitStartConsoleMessage()
-        {
-            return "Start Eventbus initializer";
-        }
-
-        public string InitEndConsoleMessage()
-        {
-            return "End Eventbus initializer";
         }
 
         private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
@@ -262,8 +258,6 @@ namespace ATI.Services.RabbitMQ
                 {
                     await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
                         subscription.Binding,
-                        subscription.Durable,
-                        subscription.AutoDelete,
                         subscription.EventbusSubscriptionHandler,
                         subscription.MetricsEntity));
                 }
@@ -276,15 +270,18 @@ namespace ATI.Services.RabbitMQ
 
         private async Task SubscribePrivateAsync(
             QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity)
         {
-            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
-            var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
-                durable: durable,
+            var queue = await _busClient.QueueDeclareAsync(
+                name: bindingInfo.Queue.Name,
+                autoDelete: bindingInfo.Queue.IsAutoDelete,
+                durable: bindingInfo.Queue.IsDurable,
                 exclusive: bindingInfo.Queue.IsExclusive);
+            
+            var exchange = new Exchange(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
+                bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
+
             _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
             _busClient.Consume(queue,
                 async (body, props, info) =>
@@ -381,6 +378,16 @@ namespace ATI.Services.RabbitMQ
             }
 
             _busClient?.Dispose();
+        }
+
+        public string InitStartConsoleMessage()
+        {
+            return "Start Eventbus initializer";
+        }
+
+        public string InitEndConsoleMessage()
+        {
+            return "End Eventbus initializer";
         }
     }
 }
