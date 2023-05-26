@@ -32,6 +32,7 @@ namespace ATI.Services.RabbitMQ
     {
         private IAdvancedBus _busClient;
         private const int RetryAttemptMax = 3;
+        private const int MaxRetryDelayPow = 2;
         private readonly JsonSerializer _jsonSerializer;
         private readonly string _connectionString;
 
@@ -39,7 +40,7 @@ namespace ATI.Services.RabbitMQ
             MetricsFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
 
         private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
-        private List<SubscriptionInfo> _exclusiveSubscriptions = new();
+        private List<SubscriptionInfo> _subscriptions = new();
         private readonly AsyncRetryPolicy _retryForeverPolicy;
         private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
@@ -49,7 +50,7 @@ namespace ATI.Services.RabbitMQ
         private const string AcceptLangHeaderName = "accept_language";
 
         public EventbusManager(JsonSerializer jsonSerializer,
-            IOptions<EventbusOptions> options, RmqTopology rmqTopology)
+                               IOptions<EventbusOptions> options, RmqTopology rmqTopology)
         {
             _options = options.Value;
             _connectionString = options.Value.ConnectionString;
@@ -64,11 +65,8 @@ namespace ATI.Services.RabbitMQ
             _retryForeverPolicy =
                 Policy.Handle<Exception>()
                     .WaitAndRetryForeverAsync(
-                        retryAttempt =>
-                            retryAttempt > RetryAttemptMax
-                                ? TimeSpan.FromSeconds(2)
-                                : TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                        (exception, _) => _logger.ErrorWithObject(exception, _exclusiveSubscriptions));
+                        retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
+                        (exception, _) => _logger.ErrorWithObject(exception, _subscriptions));
         }
 
         public Task InitializeAsync()
@@ -193,15 +191,12 @@ namespace ATI.Services.RabbitMQ
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity = null)
         {
-            if (bindingInfo.Queue.IsExclusive)
+            _subscriptions.Add(new SubscriptionInfo
             {
-                _exclusiveSubscriptions.Add(new SubscriptionInfo
-                {
-                    Binding = bindingInfo,
-                    EventbusSubscriptionHandler = handler,
-                    MetricsEntity = metricEntity
-                });
-            }
+                Binding = bindingInfo,
+                EventbusSubscriptionHandler = handler,
+                MetricsEntity = metricEntity
+            });
 
             RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
@@ -254,17 +249,17 @@ namespace ATI.Services.RabbitMQ
         {
             try
             {
-                foreach (var subscription in _exclusiveSubscriptions)
+                foreach (var subscription in _subscriptions)
                 {
                     await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
-                        subscription.Binding,
-                        subscription.EventbusSubscriptionHandler,
-                        subscription.MetricsEntity));
+                                                                           subscription.Binding,
+                                                                           subscription.EventbusSubscriptionHandler,
+                                                                           subscription.MetricsEntity));
                 }
             }
             catch (Exception e)
             {
-                _logger.ErrorWithObject(e, _exclusiveSubscriptions);
+                _logger.ErrorWithObject(e, _subscriptions);
             }
         }
 
