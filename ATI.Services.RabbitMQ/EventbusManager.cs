@@ -66,7 +66,7 @@ namespace ATI.Services.RabbitMQ
                 Policy.Handle<Exception>()
                     .WaitAndRetryForeverAsync(
                         retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
-                        (exception, _) => _logger.ErrorWithObject(exception, _subscriptions));
+                        (exception, _) => _logger.ErrorWithObject(exception));
         }
 
         public Task InitializeAsync()
@@ -259,7 +259,7 @@ namespace ATI.Services.RabbitMQ
             }
             catch (Exception e)
             {
-                _logger.ErrorWithObject(e, _subscriptions);
+                _logger.ErrorWithObject(e);
             }
         }
 
