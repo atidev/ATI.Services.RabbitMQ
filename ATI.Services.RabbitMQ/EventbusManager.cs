@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -40,7 +41,7 @@ namespace ATI.Services.RabbitMQ
             MetricsFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
 
         private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
-        private List<SubscriptionInfo> _subscriptions = new();
+        private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
         private readonly AsyncRetryPolicy _retryForeverPolicy;
         private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
