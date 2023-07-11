@@ -201,19 +201,14 @@ namespace ATI.Services.RabbitMQ
 
             RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
-            if (_busClient.IsConnected)
+            try
             {
-                try
-                {
-                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
-                }
-                // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
-                catch (Exception ex)
-                {
-                    _logger.Error(ex);
-                    _subscribePolicy.ExecuteAsync(async () =>
-                        await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
-                }
+                await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
+            }
+            // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
+            catch (Exception ex)
+            {
+                _logger.Error(ex);
             }
         }
 
