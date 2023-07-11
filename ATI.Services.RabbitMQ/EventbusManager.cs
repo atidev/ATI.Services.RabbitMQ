@@ -239,7 +239,14 @@ namespace ATI.Services.RabbitMQ
             {
                 try
                 {
-                    await DeclareBindQueue(subscription.Binding);
+                    if (subscription.Binding.Queue.IsExclusive)
+                    {
+                        await SubscribePrivateAsync(subscription.Binding,
+                                                    subscription.EventbusSubscriptionHandler,
+                                                    subscription.MetricsEntity);
+                    }
+                    else
+                        await DeclareBindQueue(subscription.Binding);
                 }
                 catch (Exception e)
                 {
