@@ -48,8 +48,6 @@ namespace ATI.Services.RabbitMQ
         private static readonly UTF8Encoding BodyEncoding = new(false);
         private readonly RmqTopology _rmqTopology;
 
-        private const string AcceptLangHeaderName = "accept_language";
-
         public EventbusManager(JsonSerializer jsonSerializer,
                                IOptions<EventbusOptions> options, RmqTopology rmqTopology)
         {
@@ -205,7 +203,6 @@ namespace ATI.Services.RabbitMQ
             {
                 await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
             }
-            // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
             catch (Exception ex)
             {
                 _logger.Error(ex);
@@ -257,12 +254,9 @@ namespace ATI.Services.RabbitMQ
             string metricEntity)
         {
             var queue = await DeclareBindQueue(bindingInfo);
-            _busClient.Consume(queue,
-                async (body, props, info) =>
-                    await HandleEventBusMessageWithPolicy(body, props, info));
+            _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
 
-            async Task HandleEventBusMessageWithPolicy(byte[] body, MessageProperties props,
-                MessageReceivedInfo info)
+            async Task HandleEventBusMessageWithPolicy(byte[] body, MessageProperties props, MessageReceivedInfo info)
             {
                 using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
                 {
@@ -299,18 +293,25 @@ namespace ATI.Services.RabbitMQ
 
         private void GetAcceptLanguageFromProperties(MessageProperties props)
         {
-            if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
-                return;
+            try
+            {
+                if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
+                    return;
 
-            var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
-            FlowContext<RequestMetaData>.Current =
-                new RequestMetaData
-                {
-                    RabbitAcceptLanguage = acceptLanguageStr
-                };
+                var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
+                FlowContext<RequestMetaData>.Current =
+                    new RequestMetaData
+                    {
+                        RabbitAcceptLanguage = acceptLanguageStr
+                    };
 
-            if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
-                CultureInfo.CurrentUICulture = cultureInfo;
+                if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                    CultureInfo.CurrentUICulture = cultureInfo;
+            }
+            catch (Exception e)
+            {
+                _logger.ErrorWithObject(e, message: "Error while parsing accept_language from properties", props);
+            }
         }
 
         private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
