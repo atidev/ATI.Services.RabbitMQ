@@ -215,11 +215,6 @@ namespace ATI.Services.RabbitMQ
                         await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
                 }
             }
-            else
-            {
-                _subscribePolicy.ExecuteAsync(async () =>
-                    await SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
-            }
         }
 
         private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
@@ -248,19 +243,16 @@ namespace ATI.Services.RabbitMQ
 
         private async Task ResubscribeOnReconnect()
         {
-            try
+            foreach (var subscription in _subscriptions)
             {
-                foreach (var subscription in _subscriptions)
+                try
                 {
-                    await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
-                                                                           subscription.Binding,
-                                                                           subscription.EventbusSubscriptionHandler,
-                                                                           subscription.MetricsEntity));
+                    await DeclareBindQueue(subscription.Binding);
                 }
-            }
-            catch (Exception e)
-            {
-                _logger.ErrorWithObject(e);
+                catch (Exception e)
+                {
+                    _logger.ErrorWithObject(e, _subscriptions);
+                }
             }
         }
 
@@ -269,16 +261,7 @@ namespace ATI.Services.RabbitMQ
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity)
         {
-            var queue = await _busClient.QueueDeclareAsync(
-                name: bindingInfo.Queue.Name,
-                autoDelete: bindingInfo.Queue.IsAutoDelete,
-                durable: bindingInfo.Queue.IsDurable,
-                exclusive: bindingInfo.Queue.IsExclusive);
-            
-            var exchange = new Exchange(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type,
-                bindingInfo.Queue.IsDurable, bindingInfo.Queue.IsAutoDelete);
-
-            _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+            var queue = await DeclareBindQueue(bindingInfo);
             _busClient.Consume(queue,
                 async (body, props, info) =>
                     await HandleEventBusMessageWithPolicy(body, props, info));
@@ -292,6 +275,23 @@ namespace ATI.Services.RabbitMQ
                     await ExecuteWithPolicy(async () => await handler.Invoke(body, props, info));
                 }
             }
+        }
+
+        private async Task<IQueue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
+        {
+            var queue = await _busClient.QueueDeclareAsync(
+                            name: bindingInfo.Queue.Name,
+                            autoDelete: bindingInfo.Queue.IsAutoDelete,
+                            durable: bindingInfo.Queue.IsDurable,
+                            exclusive: bindingInfo.Queue.IsExclusive);
+
+            var exchange = new Exchange(bindingInfo.Exchange.Name,
+                                        bindingInfo.Exchange.Type,
+                                        bindingInfo.Queue.IsDurable,
+                                        bindingInfo.Queue.IsAutoDelete);
+
+            _busClient.Bind(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+            return queue;
         }
 
         private void HandleMessageProps(MessageProperties props)
