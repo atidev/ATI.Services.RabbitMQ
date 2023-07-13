@@ -205,7 +205,10 @@ namespace ATI.Services.RabbitMQ
             }
             catch (Exception ex)
             {
-                _logger.Error(ex);
+                _logger.ErrorWithObject(ex,
+                                        "Initial subscription failed, trying to subscribe in background",
+                                        logObjects: bindingInfo.Queue.Name);
+                _subscribePolicy.ExecuteAsync(() => SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
         }
 
@@ -235,22 +238,33 @@ namespace ATI.Services.RabbitMQ
 
         private async Task ResubscribeOnReconnect()
         {
+            _logger.Warn("Reconnect happened, start resubscribing");
             foreach (var subscription in _subscriptions)
             {
                 try
                 {
-                    if (subscription.Binding.Queue.IsExclusive)
-                    {
-                        await SubscribePrivateAsync(subscription.Binding,
-                                                    subscription.EventbusSubscriptionHandler,
-                                                    subscription.MetricsEntity);
-                    }
-                    else
-                        await DeclareBindQueue(subscription.Binding);
+                    await ResubscribeInternalAsync(subscription);
                 }
                 catch (Exception e)
                 {
-                    _logger.ErrorWithObject(e, _subscriptions);
+                    _logger.ErrorWithObject(e, "Failed to resubscribe", logObjects: subscription.Binding.Queue.Name);
+                    _retryForeverPolicy.ExecuteAsync(() => ResubscribeInternalAsync(subscription)).Forget();
+                }
+            }
+
+            async Task ResubscribeInternalAsync(SubscriptionInfo sub)
+            {
+                if (sub.Binding.Queue.IsExclusive)
+                {
+                    await SubscribePrivateAsync(sub.Binding,
+                                                sub.EventbusSubscriptionHandler,
+                                                sub.MetricsEntity);
+                }
+                else
+                {
+                    // for non exclusive queues we reuse existing consumer
+                    // alternative is to dispose old consumer and create new consumer
+                    await DeclareBindQueue(sub.Binding);
                 }
             }
         }
