@@ -1,7 +1,10 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 using ATI.Services.Common.Context;
@@ -30,28 +33,29 @@ namespace ATI.Services.RabbitMQ
     public class EventbusManager : IDisposable, IInitializer
     {
         private IAdvancedBus _busClient;
-        private const int RetryAttemptMax = 4;
+        private const int RetryAttemptMax = 3;
+        private const int MaxRetryDelayPow = 2;
         private readonly JsonSerializer _jsonSerializer;
         private readonly string _connectionString;
 
-        private readonly MetricsTracingFactory _metricsTracingFactory =
-            MetricsTracingFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
+        private readonly MetricsFactory _metricsTracingFactory =
+            MetricsFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
 
         private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
-        private List<SubscriptionInfo> _exclusiveSubscriptions = new();
+        private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
         private readonly AsyncRetryPolicy _retryForeverPolicy;
         private readonly AsyncRetryPolicy _subscribePolicy;
         private readonly EventbusOptions _options;
         private static readonly UTF8Encoding BodyEncoding = new(false);
-
-        private const string AcceptLangHeaderName = "accept_language";
+        private readonly RmqTopology _rmqTopology;
 
         public EventbusManager(JsonSerializer jsonSerializer,
-            IOptions<EventbusOptions> options)
+                               IOptions<EventbusOptions> options, RmqTopology rmqTopology)
         {
             _options = options.Value;
             _connectionString = options.Value.ConnectionString;
             _jsonSerializer = jsonSerializer;
+            _rmqTopology = rmqTopology;
 
             _subscribePolicy = Policy.Handle<Exception>()
                 .WaitAndRetryForeverAsync(
@@ -61,31 +65,8 @@ namespace ATI.Services.RabbitMQ
             _retryForeverPolicy =
                 Policy.Handle<Exception>()
                     .WaitAndRetryForeverAsync(
-                        retryAttempt =>
-                            retryAttempt > RetryAttemptMax
-                                ? TimeSpan.FromSeconds(2)
-                                : TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                        (exception, _) => _logger.ErrorWithObject(exception, _exclusiveSubscriptions));
-        }
-
-        private async Task ResubscribeOnReconnect()
-        {
-            try
-            {
-                foreach (var subscription in _exclusiveSubscriptions)
-                {
-                    await _retryForeverPolicy.ExecuteAsync(async () => await SubscribePrivateAsync(
-                        subscription.Binding,
-                        subscription.Durable,
-                        subscription.AutoDelete,
-                        subscription.EventbusSubscriptionHandler,
-                        subscription.MetricsEntity));
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.ErrorWithObject(e, _exclusiveSubscriptions);
-            }
+                        retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
+                        (exception, _) => _logger.ErrorWithObject(exception));
         }
 
         public Task InitializeAsync()
@@ -110,17 +91,8 @@ namespace ATI.Services.RabbitMQ
             return Task.CompletedTask;
         }
 
-        public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName)
-        {
-            return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic);
-        }
-
-        public Task<Exchange[]> DeclareExchangeTopicAsync(params string[] exchangeNames)
-        {
-            var tasks = exchangeNames.Select(exchangeName =>
-                _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic));
-            return Task.WhenAll(tasks);
-        }
+        public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) => 
+            _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
 
         public async Task PublishRawAsync(
             string publishBody,
@@ -196,107 +168,53 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
-        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
-        {
-            var messageProperties = new MessageProperties
-            {
-                AppId = ServiceVariables.ServiceAsClientName
-            };
-
-            string flowAcceptLang;
-            if (withAcceptLang && (flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage) != null)
-                messageProperties.Headers.Add(AcceptLangHeaderName, flowAcceptLang);
-
-            if (additionalHeaders != null)
-                foreach (var additionalHeader in additionalHeaders)
-                {
-                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
-                }
-
-            return messageProperties;
-        }
-
-        private async Task SubscribePrivateAsync(
-            QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
+        public Task SubscribeAsync(
+            string exchangeName,
+            string routingKey,
+            bool isExclusive,
+            bool isDurable,
+            bool isAutoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-            string metricEntity)
+            bool isExclusiveQueueName = false,
+            string customQueueName = null,
+            string metricEntity = null)
         {
-            var exchange = await _busClient.ExchangeDeclareAsync(bindingInfo.Exchange.Name, bindingInfo.Exchange.Type);
-            var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name, autoDelete: autoDelete,
-                durable: durable,
-                exclusive: bindingInfo.Queue.IsExclusive);
-            await _busClient.BindAsync(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
-            _busClient.Consume(queue,
-                async (body, props, info) =>
-                    await HandleEventBusMessageWithPolicy(body, props, info));
-
-            async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props,
-                MessageReceivedInfo info)
-            {
-                using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
-                {
-                    if (props.HeadersPresent && props.Headers.TryGetValue("accept_language", out var acceptLanguage))
-                    {
-                        var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
-                        FlowContext<RequestMetaData>.Current =
-                            new RequestMetaData
-                            {
-                                RabbitAcceptLanguage = acceptLanguageStr
-                            };
-
-                        if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
-                            CultureInfo.CurrentUICulture = cultureInfo;
-                    }
-
-                    await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
-                }
-            }
+            var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
+                isExclusiveQueueName, customQueueName);
+            return SubscribeAsync(binding, handler, metricEntity);
         }
 
         public async Task SubscribeAsync(
             QueueExchangeBinding bindingInfo,
-            bool durable,
-            bool autoDelete,
             Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
             string metricEntity = null)
         {
-            if (bindingInfo.Queue.IsExclusive)
+            _subscriptions.Add(new SubscriptionInfo
             {
-                _exclusiveSubscriptions.Add(new SubscriptionInfo
-                {
-                    Binding = bindingInfo,
-                    Durable = durable,
-                    AutoDelete = autoDelete,
-                    EventbusSubscriptionHandler = handler,
-                    MetricsEntity = metricEntity
-                });
-            }
+                Binding = bindingInfo,
+                EventbusSubscriptionHandler = handler,
+                MetricsEntity = metricEntity
+            });
 
             RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
-            if (_busClient.IsConnected)
+            try
             {
-                try
-                {
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity);
-                }
-                // В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке
-                catch (Exception ex)
-                {
-                    _logger.Error(ex);
-                    _subscribePolicy.ExecuteAsync(async () =>
-                        await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
-                }
+                await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
             }
-            else
+            catch (Exception ex)
             {
-                _subscribePolicy.ExecuteAsync(async () =>
-                    await SubscribePrivateAsync(bindingInfo, durable, autoDelete, handler, metricEntity)).Forget();
+                _logger.ErrorWithObject(ex,
+                                        "Initial subscription failed, trying to subscribe in background",
+                                        logObjects: bindingInfo.Queue.Name);
+                _subscribePolicy.ExecuteAsync(() => SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
             }
         }
 
+        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+            Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
+                Policy.Handle<Exception>()
+                    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
 
         private async Task ExecuteWithPolicy(Func<Task> action)
         {
@@ -317,10 +235,148 @@ namespace ATI.Services.RabbitMQ
             }
         }
 
-        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
-            Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
-                Policy.Handle<Exception>()
-                    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
+        private async Task ResubscribeOnReconnect()
+        {
+            _logger.Warn("Reconnect happened, start resubscribing");
+            foreach (var subscription in _subscriptions)
+            {
+                try
+                {
+                    await ResubscribeInternalAsync(subscription);
+                }
+                catch (Exception e)
+                {
+                    _logger.ErrorWithObject(e, "Failed to resubscribe", logObjects: subscription.Binding.Queue.Name);
+                    _retryForeverPolicy.ExecuteAsync(() => ResubscribeInternalAsync(subscription)).Forget();
+                }
+            }
+
+            async Task ResubscribeInternalAsync(SubscriptionInfo sub)
+            {
+                if (sub.Binding.Queue.IsExclusive)
+                {
+                    await SubscribePrivateAsync(sub.Binding,
+                                                sub.EventbusSubscriptionHandler,
+                                                sub.MetricsEntity);
+                }
+                else
+                {
+                    // for non exclusive queues we reuse existing consumer
+                    // alternative is to dispose old consumer and create new consumer
+                    await DeclareBindQueue(sub.Binding);
+                }
+            }
+        }
+
+        private async Task SubscribePrivateAsync(
+            QueueExchangeBinding bindingInfo,
+            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+            string metricEntity)
+        {
+            var queue = await DeclareBindQueue(bindingInfo);
+            _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
+
+            async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
+            {
+                using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
+                {
+                    HandleMessageProps(props);
+                    await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
+                }
+            }
+        }
+
+        private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
+        {
+            var queue = await _busClient.QueueDeclareAsync(
+                            name: bindingInfo.Queue.Name,
+                            autoDelete: bindingInfo.Queue.IsAutoDelete,
+                            durable: bindingInfo.Queue.IsDurable,
+                            exclusive: bindingInfo.Queue.IsExclusive);
+
+            var exchange = new Exchange(bindingInfo.Exchange.Name,
+                                        bindingInfo.Exchange.Type,
+                                        bindingInfo.Queue.IsDurable,
+                                        bindingInfo.Queue.IsAutoDelete);
+
+            await _busClient.BindAsync(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+            return queue;
+        }
+
+        private void HandleMessageProps(MessageProperties props)
+        {
+            if (!props.HeadersPresent)
+                return;
+
+            GetAcceptLanguageFromProperties(props);
+        }
+
+        private void GetAcceptLanguageFromProperties(MessageProperties props)
+        {
+            try
+            {
+                if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
+                    return;
+
+                var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
+                FlowContext<RequestMetaData>.Current =
+                    new RequestMetaData
+                    {
+                        RabbitAcceptLanguage = acceptLanguageStr
+                    };
+
+                if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                    CultureInfo.CurrentUICulture = cultureInfo;
+            }
+            catch (Exception e)
+            {
+                _logger.ErrorWithObject(e, message: "Error while parsing accept_language from properties", props);
+            }
+        }
+
+        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
+        {
+            var messageProperties = new MessageProperties
+            {
+                AppId = ServiceVariables.ServiceAsClientName
+            };
+
+            SetTraceHeadersFromActivity(messageProperties);
+            if (withAcceptLang)
+                SetAcceptLanguageHeader(messageProperties);
+
+            if (additionalHeaders != null)
+            {
+                foreach (var additionalHeader in additionalHeaders)
+                {
+                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
+                }
+            }
+
+            return messageProperties;
+        }
+
+        private void SetTraceHeadersFromActivity(MessageProperties properties)
+        {
+            if (Activity.Current is not { Baggage: { } bgg })
+                return;
+
+            var baggageArray = bgg.ToArray();
+            if (baggageArray.Length == 0)
+                return;
+
+            var baggageProperties = baggageArray
+                .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
+
+            properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
+        }
+
+        private void SetAcceptLanguageHeader(MessageProperties properties)
+        {
+            var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
+            if (flowAcceptLang != null)
+                properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
+        }
 
         public void Dispose()
         {

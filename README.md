@@ -10,6 +10,8 @@
 #### Разработка теперь выглядит вот так:
 1. Создаем ветку, пушим изменения, создаем pull request.
 2. Вешаем на ветку тег например `v1.0.2-new-auth-12`
+    - git tag -a v1.0.2-new-auth-12 -m "your description"  
+    - git push origin v1.0.2-new-auth-12
 3. Срабатывает workflow билдит и пушит версию(берёт из названия тега) в nuget.
 4. По готовности мерджим ветку в master.
 5. Вешаем релизный тег на нужный коммит мастера.
@@ -38,42 +40,17 @@
   //или, если ChangeTrackerOptions лежат в другой секции
   services.AddEventBus(typeof(ChangeTrackerManagerOptions).Name);
 ```
-Далее создаем свой `ChangeTrackingManager`, который отвечает за инициализацию очередей и подписок на них при старте сервиса:
+Далее создаем свой `EventbusManager`, который отвечает за инициализацию очередей и подписок на них при старте сервиса:
 ```c#
- public sealed class EventbusManager : IInitializer
+ [InitializeOrder(Order = InitializeOrder.Sixth)]
+ public sealed class EventbusInitializer : IInitializer
  {
-   public InitializeOrder Order { get; set; } = InitializeOrder.ChangeTracker;
    public async Task InitializeAsync()
    {
    }
- }
-```
-Регистрируем в качестве Singlton `RMQTopology`, если необходимо. 
-Готово.
-Конфигурим класс `ChangeTrackerOptions`, который должен выглядеть так:
-```json 
-  "ChangeTrackerOptions": {
-    "ServiceName": "Service-name",
-    "ConnectionString": "Rabbit-mq-connection.string",
-    "Environment": "env",
-    "ErrorQueueName":"error_queue_name", //очередь для хранения ошибок обработки сообщений
-    "RabbitConnectInterval":"00:00:05" //время переподключения к RabbitMQ 
-  }
-```
-В `Startup.cs` вызываем 
-```c#
-  services.AddChangeTracking();
-  //или, если ChangeTrackerOptions лежат в другой секции
-  services.AddChangeTracking(typeof(ChangeTrackerManagerOptions).Name);
-```
-Далее создаем свой `ChangeTrackingManager`, который отвечает за инициализацию очередей и подписок на них при старте сервиса:
-```c#
- public sealed class ChangeTrackingManager : IInitializer
- {
-   public InitializeOrder Order { get; set; } = InitializeOrder.ChangeTracker;
-   public async Task InitializeAsync()
-   {
-   }
+   
+   public string InitStartConsoleMessage() => $"Start initialization for {nameof(EventbusInitializer)}";
+   public string InitEndConsoleMessage() => $"End initialization for {nameof(EventbusInitializer)}";
  }
 ```
 Регистрируем в качестве Singlton `RMQTopology`, если необходимо. 
