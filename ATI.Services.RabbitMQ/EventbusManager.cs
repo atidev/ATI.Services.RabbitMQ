@@ -95,6 +95,31 @@ namespace ATI.Services.RabbitMQ
             return _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
         }
 
+#nullable enable
+        public Task<IExchange?> DeclareExchangeTypedAsync(string exchangeName, string type, bool durable, bool autoDelete)
+        {
+            try
+            {
+#pragma warning disable CS8600 // Преобразование литерала, допускающего значение NULL или возможного значения NULL в тип, не допускающий значение NULL.
+                var values = typeof(ExchangeType).GetProperties().Select(p => (string)p.GetValue(null));
+#pragma warning restore CS8600 // Преобразование литерала, допускающего значение NULL или возможного значения NULL в тип, не допускающий значение NULL.
+                if (values is null || !values.Any(t => t == type))
+                {
+                    throw new ArgumentOutOfRangeException(
+                        paramName: nameof(type),
+                        message: $"Passed exchange type doesn`t exist in class {nameof(ExchangeType)}");
+                }
+
+                return _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex);
+                return Task.FromResult<IExchange?>(null);
+            }
+        }
+#nullable disable
+
         public async Task PublishRawAsync(
             string publishBody,
             string exchangeName,
