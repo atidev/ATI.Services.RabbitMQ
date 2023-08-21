@@ -5,6 +5,6 @@ namespace ATI.Services.RabbitMQ
 {
     public static class RabbitMqDeclaredQueues
     {
-        public static List<IQueue> DeclaredQueues { get; } = new();
+        public static List<Queue> DeclaredQueues { get; } = new();
     }
 }
