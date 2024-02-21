@@ -38,7 +38,7 @@ public class EventbusManager : IDisposable, IInitializer
     private readonly JsonSerializer _jsonSerializer;
     private readonly string _connectionString;
 
-    private readonly MetricsFactory _inMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsDirection.In, nameof(EventbusManager), additionalSummaryLabels: "client_header_name");
+    private readonly MetricsFactory _inMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsDirection.In, nameof(EventbusManager), additionalSummaryLabels: "rmq_app_id");
     private readonly MetricsFactory _outMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsDirection.Out, nameof(EventbusManager));
 
     private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
