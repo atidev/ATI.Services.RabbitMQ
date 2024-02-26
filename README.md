@@ -47,13 +47,32 @@
  {
    public async Task InitializeAsync()
    {
+       var binding = _rmqTopology.CreateBinding(
+                "your_exchange_name",
+                "your_routing_key", isExclusive: false,
+                isDurable: true, isAutoDelete: false);
+
+       await _eventbusManager.SubscribeAsync(binding, Handler);
    }
+   
+   //this wrapped by metric collection
+   private async Task Handler(byte[] message, MessageProperties properties, MessageReceivedInfo info)
+   {
+       var someEntityEvent = _jsonSerializer.Deserialize<SomeEntity>(message);
+   }
+   
+    public async Task SendEmailAsync(...)
+    {
+        //this wrapped by metric collection
+        await _eventbusManager.PublishAsync(email, "your_exchange_name", "your_routing_key", MetricEntity.SomeEntity);
+    }
    
    public string InitStartConsoleMessage() => $"Start initialization for {nameof(EventbusInitializer)}";
    public string InitEndConsoleMessage() => $"End initialization for {nameof(EventbusInitializer)}";
  }
 ```
-Регистрируем в качестве Singlton `RMQTopology`, если необходимо. 
+Регистрируем в качестве Singleton `RMQTopology`, если необходимо. 
+Можно не собирать метрики при получении и отправке сообщений в вашем сервисе, т.к. это уже сделано в EventbusManager 
 Готово.
 
 
