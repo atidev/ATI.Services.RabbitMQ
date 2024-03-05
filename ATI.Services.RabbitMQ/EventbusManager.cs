@@ -27,321 +27,218 @@ using Polly.Retry;
 using Polly.Wrap;
 using JsonSerializer = Newtonsoft.Json.JsonSerializer;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ;
+
+[PublicAPI]
+[InitializeOrder(Order = InitializeOrder.First)]
+public class EventbusManager : IDisposable, IInitializer
 {
-    [PublicAPI]
-    [InitializeOrder(Order = InitializeOrder.First)]
-    public class EventbusManager : IDisposable, IInitializer
+    private IAdvancedBus _busClient;
+    private const int RetryAttemptMax = 3;
+    private const int MaxRetryDelayPow = 2;
+    private const string DelayQueueSuffix = "_delay";
+    private const string PoisonQueueSuffix = "_poison";
+    private readonly JsonSerializer _jsonSerializer;
+    private readonly string _connectionString;
+
+    private readonly MetricsFactory _inMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Subscribe, nameof(EventbusManager), additionalSummaryLabels: "rmq_app_id");
+    private readonly MetricsFactory _outMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Publish, nameof(EventbusManager));
+
+    private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
+    private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
+    private readonly AsyncRetryPolicy _retryForeverPolicy;
+    private readonly AsyncRetryPolicy _subscribePolicy;
+    private readonly EventbusOptions _options;
+    private static readonly UTF8Encoding BodyEncoding = new(false);
+    private readonly RmqTopology _rmqTopology;
+
+    public EventbusManager(JsonSerializer jsonSerializer,
+                           IOptions<EventbusOptions> options, RmqTopology rmqTopology)
     {
-        private IAdvancedBus _busClient;
-        private const int RetryAttemptMax = 3;
-        private const int MaxRetryDelayPow = 2;
-        private const string DelayQueueSuffix = "_delay";
-        private const string PoisonQueueSuffix = "_poison";
-        private readonly JsonSerializer _jsonSerializer;
-        private readonly string _connectionString;
+        _options = options.Value;
+        _connectionString = options.Value.ConnectionString;
+        _jsonSerializer = jsonSerializer;
+        _rmqTopology = rmqTopology;
 
-        private readonly MetricsFactory _metricsTracingFactory =
-            MetricsFactory.CreateRepositoryMetricsFactory(nameof(EventbusManager));
+        _subscribePolicy = Policy.Handle<Exception>()
+                                 .WaitAndRetryForeverAsync(
+                                     _ => _options.RabbitConnectInterval,
+                                     (exception, _) => _logger.Error(exception));
 
-        private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
-        private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
-        private readonly AsyncRetryPolicy _retryForeverPolicy;
-        private readonly AsyncRetryPolicy _subscribePolicy;
-        private readonly EventbusOptions _options;
-        private static readonly UTF8Encoding BodyEncoding = new(false);
-        private readonly RmqTopology _rmqTopology;
+        _retryForeverPolicy =
+            Policy.Handle<Exception>()
+                  .WaitAndRetryForeverAsync(
+                      retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
+                      (exception, _) => _logger.ErrorWithObject(exception));
+    }
 
-        public EventbusManager(JsonSerializer jsonSerializer,
-                               IOptions<EventbusOptions> options, RmqTopology rmqTopology)
+    public Task InitializeAsync()
+    {
+        try
         {
-            _options = options.Value;
-            _connectionString = options.Value.ConnectionString;
-            _jsonSerializer = jsonSerializer;
-            _rmqTopology = rmqTopology;
+            _busClient = RabbitHutch.CreateBus(_connectionString,
+                                               serviceRegister =>
+                                               {
+                                                   serviceRegister.Register<IConventions>(c =>
+                                                       new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options));
+                                               }).Advanced;
 
-            _subscribePolicy = Policy.Handle<Exception>()
-                .WaitAndRetryForeverAsync(
-                    _ => _options.RabbitConnectInterval,
-                    (exception, _) => _logger.Error(exception));
-
-            _retryForeverPolicy =
-                Policy.Handle<Exception>()
-                    .WaitAndRetryForeverAsync(
-                        retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
-                        (exception, _) => _logger.ErrorWithObject(exception));
+            _busClient.Connected += async (_, _) => await ResubscribeOnReconnect();
+            _busClient.Disconnected += (_, _) => { _logger.Error("Disconnected from RMQ for some reason!"); };
+        }
+        catch (Exception exception)
+        {
+            _logger.Error(exception);
         }
 
-        public Task InitializeAsync()
+        return Task.CompletedTask;
+    }
+
+    public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) =>
+        _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
+
+    public async Task PublishRawAsync(
+        string publishBody,
+        string exchangeName,
+        string routingKey,
+        string metricEntity,
+        Dictionary<string, object> additionalHeaders = null,
+        bool mandatory = false,
+        TimeSpan? timeout = null,
+        bool withAcceptLang = true)
+    {
+        if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
+            string.IsNullOrWhiteSpace(publishBody))
+            return;
+
+        using (_outMetricsFactory.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
         {
-            try
-            {
-                _busClient = RabbitHutch.CreateBus(_connectionString,
-                    serviceRegister =>
-                    {
-                        serviceRegister.Register<IConventions>(c =>
-                            new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options));
-                    }).Advanced;
+            var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
+            var exchange = new Exchange(exchangeName);
+            var body = BodyEncoding.GetBytes(publishBody);
 
-                _busClient.Connected += async (_, _) => await ResubscribeOnReconnect();
-                _busClient.Disconnected += (_, _) => { _logger.Error("Disconnected from RMQ for some reason!"); };
-            }
-            catch (Exception exception)
-            {
-                _logger.Error(exception);
-            }
+            var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
+                                    await _busClient.PublishAsync(
+                                        exchange,
+                                        routingKey,
+                                        mandatory,
+                                        messageProperties,
+                                        body));
 
-            return Task.CompletedTask;
+            if (sendingResult.FinalException != null)
+            {
+                _logger.ErrorWithObject(sendingResult.FinalException,
+                                        new { publishBody, exchangeName, routingKey, metricEntity, mandatory });
+            }
         }
+    }
 
-        public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) => 
-            _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
+    public async Task PublishAsync<T>(
+        T publishObject,
+        string exchangeName,
+        string routingKey,
+        string metricEntity,
+        Dictionary<string, object> additionalHeaders = null,
+        bool mandatory = false,
+        JsonSerializer serializer = null,
+        TimeSpan? timeout = null,
+        bool withAcceptLang = true)
+    {
+        if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
+            publishObject == null)
+            return;
 
-        public async Task PublishRawAsync(
-            string publishBody,
-            string exchangeName,
-            string routingKey,
-            string metricEntity,
-            Dictionary<string, object> additionalHeaders = null,
-            bool mandatory = false,
-            TimeSpan? timeout = null,
-            bool withAcceptLang = true)
+        using (_outMetricsFactory.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
         {
-            if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
-                string.IsNullOrWhiteSpace(publishBody))
-                return;
+            var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
+            var exchange = new Exchange(exchangeName);
+            var bodySerializer = serializer ?? _jsonSerializer;
+            var body = bodySerializer.ToJsonBytes(publishObject);
 
-            using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
+            var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
+                                    await _busClient.PublishAsync(
+                                        exchange,
+                                        routingKey,
+                                        mandatory,
+                                        messageProperties,
+                                        body));
+
+            if (sendingResult.FinalException != null)
             {
-                var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
-                var exchange = new Exchange(exchangeName);
-                var body = BodyEncoding.GetBytes(publishBody);
+                _logger.ErrorWithObject(sendingResult.FinalException,
+                                        new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
+            }
+        }
+    }
 
-                var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
-                    await _busClient.PublishAsync(
-                        exchange,
-                        routingKey,
-                        mandatory,
-                        messageProperties,
-                        body));
+    public Task SubscribeAsync(
+        string exchangeName,
+        string routingKey,
+        bool isExclusive,
+        bool isDurable,
+        bool isAutoDelete,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+        bool isExclusiveQueueName = false,
+        string customQueueName = null,
+        string metricEntity = null)
+    {
+        var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
+                                                 isExclusiveQueueName, customQueueName);
+        return SubscribeAsync(binding, handler, metricEntity);
+    }
 
-                if (sendingResult.FinalException != null)
+    public async Task SubscribeAsync(
+        QueueExchangeBinding bindingInfo,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+        string metricEntity = null)
+    {
+        _subscriptions.Add(new SubscriptionInfo
+        {
+            Binding = bindingInfo,
+            EventbusSubscriptionHandler = handler,
+            MetricsEntity = metricEntity
+        });
+
+        RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
+
+        try
+        {
+            await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
+        }
+        catch (Exception ex)
+        {
+            _logger.ErrorWithObject(ex,
+                                    "Initial subscription failed, trying to subscribe in background",
+                                    logObjects: bindingInfo.Queue.Name);
+            _subscribePolicy.ExecuteAsync(() => SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
+        }
+    }
+
+    private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+        Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
+            Policy.Handle<Exception>()
+                .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
+
+    private async Task ExecuteWithPolicy(Func<Task> action)
+    {
+        var policy = Policy.Handle<TimeoutException>()
+            .WaitAndRetryAsync(
+                RetryAttemptMax,
+                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                (exception, timeSpan, retryCount, _) =>
                 {
-                    _logger.ErrorWithObject(sendingResult.FinalException,
-                        new { publishBody, exchangeName, routingKey, metricEntity, mandatory });
-                }
-            }
-        }
+                    _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
+                });
 
-        public async Task PublishAsync<T>(
-            T publishObject,
-            string exchangeName,
-            string routingKey,
-            string metricEntity,
-            Dictionary<string, object> additionalHeaders = null,
-            bool mandatory = false,
-            JsonSerializer serializer = null,
-            TimeSpan? timeout = null,
-            bool withAcceptLang = true)
+        var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
+
+        if (policyResult.FinalException != null)
         {
-            if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
-                publishObject == null)
-                return;
-
-            using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity))
-            {
-                var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
-                var exchange = new Exchange(exchangeName);
-                var bodySerializer = serializer ?? _jsonSerializer;
-                var body = bodySerializer.ToJsonBytes(publishObject);
-
-                var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
-                    await _busClient.PublishAsync(
-                        exchange,
-                        routingKey,
-                        mandatory,
-                        messageProperties,
-                        body));
-
-                if (sendingResult.FinalException != null)
-                {
-                    _logger.ErrorWithObject(sendingResult.FinalException,
-                        new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
-                }
-            }
+            _logger.ErrorWithObject(policyResult.FinalException, action);
         }
+    }
 
-        public Task SubscribeAsync(
-            string exchangeName,
-            string routingKey,
-            bool isExclusive,
-            bool isDurable,
-            bool isAutoDelete,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-            bool isExclusiveQueueName = false,
-            string customQueueName = null,
-            string metricEntity = null)
-        {
-            var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
-                isExclusiveQueueName, customQueueName);
-            return SubscribeAsync(binding, handler, metricEntity);
-        }
-
-        public async Task SubscribeAsync(
-            QueueExchangeBinding bindingInfo,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-            string metricEntity = null)
-        {
-            _subscriptions.Add(new SubscriptionInfo
-            {
-                Binding = bindingInfo,
-                EventbusSubscriptionHandler = handler,
-                MetricsEntity = metricEntity
-            });
-
-            RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
-
-            try
-            {
-                await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
-            }
-            catch (Exception ex)
-            {
-                _logger.ErrorWithObject(ex,
-                                        "Initial subscription failed, trying to subscribe in background",
-                                        logObjects: bindingInfo.Queue.Name);
-                _subscribePolicy.ExecuteAsync(() => SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
-            }
-        }
-
-#nullable enable
-        public async Task SubscribeAsync(
-            QueueExchangeBinding mainQueueBinding,
-            bool durable,
-            bool autoDelete,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> handler,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>>? poisonHandler = null,
-            DelayedRequeueConfiguration? requeueConfig = null,
-            string? metricEntity = null)
-        {
-            RabbitMqDeclaredQueues.DeclaredQueues.Add(mainQueueBinding.Queue);
-
-            if (requeueConfig?.MaxRetryRequeueCount == 0)
-            {
-                throw new ArgumentException(
-                    $"{nameof(DelayedRequeueConfiguration.MaxRetryRequeueCount)} должен содержать себе минимум одну попытку",
-                    nameof(DelayedRequeueConfiguration.MaxRetryRequeueCount));
-            }
-
-            QueueExchangeBinding? delayQueue = null;
-            QueueExchangeBinding? poisonQueue = null;
-            if (requeueConfig != null)
-            {
-                delayQueue = _rmqTopology.CreateBinding(
-                    mainQueueBinding.Exchange.Name,
-                    $"{mainQueueBinding.RoutingKey}{DelayQueueSuffix}",
-                    isExclusive: false,
-                    isDurable: true,
-                    isAutoDelete: false);
-
-                poisonQueue = _rmqTopology.CreateBinding(
-                    mainQueueBinding.Exchange.Name,
-                    $"{mainQueueBinding.RoutingKey}{PoisonQueueSuffix}",
-                    isExclusive: false,
-                    isDurable: true,
-                    isAutoDelete: false);
-
-                RabbitMqDeclaredQueues.DeclaredQueues.AddRange(new[] {delayQueue.Queue, poisonQueue.Queue});
-            }
-
-            if (_busClient.IsConnected)
-            {
-                try
-                {
-                    await (requeueConfig != null && delayQueue != null && poisonQueue != null
-                            ? BindConsumerAsync(
-                                mainQueueBinding,
-                                delayQueue,
-                                poisonQueue,
-                                handler,
-                                poisonHandler,
-                                requeueConfig,
-                                metricEntity)
-                            : SubscribePrivateAsync(
-                                mainQueueBinding,
-                                handler,
-                                metricEntity)
-                        );
-                }
-                catch (Exception ex)
-                {
-                    _logger.Error(ex);
-                    _logger.Info(
-                        "В интервале между проверкой _busClient.IsConnected и SubscribeAsyncPrivate Rabbit может отвалиться, поэтому запускаем в бекграунд потоке"
-                    );
-                    var bindConsumerTask = requeueConfig != null && delayQueue != null && poisonQueue != null
-                        ? BindConsumerAsync(
-                            mainQueueBinding,
-                            delayQueue,
-                            poisonQueue,
-                            handler,
-                            poisonHandler,
-                            requeueConfig,
-                            metricEntity)
-                        : SubscribePrivateAsync(
-                            mainQueueBinding,
-                            handler,
-                            metricEntity);
-
-                    bindConsumerTask.Forget();
-                }
-            }
-            else
-            {
-                _logger.Info(" _busClient.IsConnected == false, Rabbit будет запущен в бэкграунд потоке");
-                var bindConsumerTask = requeueConfig != null && delayQueue != null && poisonQueue != null
-                    ? BindConsumerAsync(
-                        mainQueueBinding,
-                        delayQueue,
-                        poisonQueue,
-                        handler,
-                        poisonHandler,
-                        requeueConfig,
-                        metricEntity)
-                    : SubscribePrivateAsync(
-                        mainQueueBinding,
-                        handler,
-                        metricEntity);
-                bindConsumerTask.Forget();
-            }
-        }
-#nullable disable
-
-        private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
-            Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
-                Policy.Handle<Exception>()
-                    .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
-
-        private async Task ExecuteWithPolicy(Func<Task> action)
-        {
-            var policy = Policy.Handle<TimeoutException>()
-                .WaitAndRetryAsync(
-                    RetryAttemptMax,
-                    retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                    (exception, timeSpan, retryCount, _) =>
-                    {
-                        _logger.ErrorWithObject(exception, new { TimeSpan = timeSpan, RetryCount = retryCount });
-                    });
-
-            var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
-
-            if (policyResult.FinalException != null)
-            {
-                _logger.ErrorWithObject(policyResult.FinalException, action);
-            }
-        }
-
-        private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
+    private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
         {
             var policy = Policy.Handle<TimeoutException>()
                 .WaitAndRetryAsync(
@@ -362,122 +259,127 @@ namespace ATI.Services.RabbitMQ
             return policyResult.Result;
         }
 
-        private async Task ResubscribeOnReconnect()
+    private async Task ResubscribeOnReconnect()
+    {
+        _logger.Warn("Reconnect happened, start resubscribing");
+        foreach (var subscription in _subscriptions)
         {
-            _logger.Warn("Reconnect happened, start resubscribing");
-            foreach (var subscription in _subscriptions)
+            try
             {
-                try
-                {
-                    await ResubscribeInternalAsync(subscription);
-                }
-                catch (Exception e)
-                {
-                    _logger.ErrorWithObject(e, "Failed to resubscribe", logObjects: subscription.Binding.Queue.Name);
-                    _retryForeverPolicy.ExecuteAsync(() => ResubscribeInternalAsync(subscription)).Forget();
-                }
+                await ResubscribeInternalAsync(subscription);
             }
-
-            async Task ResubscribeInternalAsync(SubscriptionInfo sub)
+            catch (Exception e)
             {
-                if (sub.Binding.Queue.IsExclusive)
-                {
-                    await SubscribePrivateAsync(sub.Binding,
-                                                sub.EventbusSubscriptionHandler,
-                                                sub.MetricsEntity);
-                }
-                else
-                {
-                    // for non exclusive queues we reuse existing consumer
-                    // alternative is to dispose old consumer and create new consumer
-                    await DeclareBindQueue(sub.Binding);
-                }
+                _logger.ErrorWithObject(e, "Failed to resubscribe", logObjects: subscription.Binding.Queue.Name);
+                _retryForeverPolicy.ExecuteAsync(() => ResubscribeInternalAsync(subscription)).Forget();
             }
         }
 
-        private async Task SubscribePrivateAsync(
-            QueueExchangeBinding bindingInfo,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-            string metricEntity)
+        async Task ResubscribeInternalAsync(SubscriptionInfo sub)
         {
-            var queue = await DeclareBindQueue(bindingInfo);
-            _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
-
-            async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
+            if (sub.Binding.Queue.IsExclusive)
             {
-                using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
+                await SubscribePrivateAsync(sub.Binding,
+                                            sub.EventbusSubscriptionHandler,
+                                            sub.MetricsEntity);
+            }
+            else
+            {
+                // for non exclusive queues we reuse existing consumer
+                // alternative is to dispose old consumer and create new consumer
+                await DeclareBindQueue(sub.Binding);
+            }
+        }
+    }
+
+    private async Task SubscribePrivateAsync(
+        QueueExchangeBinding bindingInfo,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+        string metricEntity)
+    {
+        var queue = await DeclareBindQueue(bindingInfo);
+        _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
+
+        async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
+        {
+            using (_inMetricsFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
+                                                               $"{info.Exchange}:{info.RoutingKey}",
+                                                               additionalLabels: props.AppId ?? "Unknown"))
+            {
+                HandleMessageProps(props);
+                await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
+            }
+        }
+    }
+
+    private async Task BindConsumerAsync(QueueExchangeBinding mainQueueBinding,
+        QueueExchangeBinding delayQueueBinding,
+        QueueExchangeBinding poisonQueueBinding,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> handler,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> poisonHandler,
+        DelayedRequeueConfiguration delayedConfig,
+        string metricEntity)
+    {
+        var mainQueue = await DeclareBindQueue(mainQueueBinding);
+        _busClient.Consume(mainQueue, HandleEventBusMessageWithPolicyAndRequeue());
+
+        if (poisonHandler != null)
+        {
+            var poisonQueue = await DeclareBindQueue(poisonQueueBinding);
+            _busClient.Consume(poisonQueue, HandlePoisonQueueMessages());
+        }
+
+        Func<ReadOnlyMemory<byte>, MessageProperties, MessageReceivedInfo, Task<AckStrategy>>
+            HandleEventBusMessageWithPolicyAndRequeue()
+        {
+            return async (body, props, info) =>
+            {
+                using (_inMetricsFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
+                           $"{info.Exchange}:{info.RoutingKey}",
+                           additionalLabels: props.AppId ?? "Unknown"))
                 {
                     HandleMessageProps(props);
-                    await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
+                    var handlerAcknowledgeResponse = await ExecuteWithPolicy(
+                        async () => await handler.Invoke(body.ToArray(), props, info)
+                    );
+
+                    return handlerAcknowledgeResponse switch
+                    {
+                        Acknowledgements.Ack => AckStrategies.Ack,
+
+                        Acknowledgements.Nack => await HandleNackResponse(
+                            mainQueueBinding,
+                            delayQueueBinding,
+                            poisonQueueBinding,
+                            delayedConfig,
+                            props,
+                            body.ToArray()),
+
+                        Acknowledgements.Reject => AckStrategies.NackWithRequeue,
+
+                        _ => AckStrategies.Ack
+                    };
                 }
-            }
+            };
         }
 
-        private async Task BindConsumerAsync(QueueExchangeBinding mainQueueBinding,
-            QueueExchangeBinding delayQueueBinding,
-            QueueExchangeBinding poisonQueueBinding,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> handler,
-            Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> poisonHandler,
-            DelayedRequeueConfiguration delayedConfig,
-            string metricEntity)
+        Func<ReadOnlyMemory<byte>, MessageProperties, MessageReceivedInfo, Task> HandlePoisonQueueMessages()
         {
-            var mainQueue = await DeclareBindQueue(mainQueueBinding);
-            _busClient.Consume(mainQueue, HandleEventBusMessageWithPolicyAndRequeue());
-
-            if (poisonHandler != null)
+            return async (body, props, info) =>
             {
-                var poisonQueue = await DeclareBindQueue(poisonQueueBinding);
-                _busClient.Consume(poisonQueue, HandlePoisonQueueMessages());
-            }
-
-            Func<ReadOnlyMemory<byte>, MessageProperties, MessageReceivedInfo, Task<AckStrategy>>
-                HandleEventBusMessageWithPolicyAndRequeue()
-            {
-                return async (body, props, info) =>
+                using (_outMetricsFactory.CreateLoggingMetricsTimer($"{metricEntity ?? "Eventbus"}-Poison", $"{info.Exchange}:{info.RoutingKey}",
+                           additionalLabels: props.AppId ?? "Unknown"))
                 {
-                    using (_metricsTracingFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus"))
-                    {
-                        HandleMessageProps(props);
-                        var handlerAcknowledgeResponse = await ExecuteWithPolicy(
-                            async () => await handler.Invoke(body.ToArray(), props, info)
-                        );
-
-                        return handlerAcknowledgeResponse switch
-                        {
-                            Acknowledgements.Ack => AckStrategies.Ack,
-
-                            Acknowledgements.Nack => await HandleNackResponse(
-                                mainQueueBinding,
-                                delayQueueBinding,
-                                poisonQueueBinding,
-                                delayedConfig,
-                                props,
-                                body.ToArray()),
-
-                            Acknowledgements.Reject => AckStrategies.NackWithRequeue,
-
-                            _ => AckStrategies.Ack
-                        };
-                    }
-                };
-            }
-
-            Func<ReadOnlyMemory<byte>, MessageProperties, MessageReceivedInfo, Task> HandlePoisonQueueMessages()
-            {
-                return async (body, props, info) =>
-                {
-                    using (_metricsTracingFactory.CreateLoggingMetricsTimer($"{metricEntity ?? "Eventbus"}-Poison"))
-                    {
-                        HandleMessageProps(props);
-                        await ExecuteWithPolicy(
-                            async () => await poisonHandler.Invoke(body.ToArray(), props, info)
-                        );
-                    }
-                };
-            }
+                    HandleMessageProps(props);
+                    await ExecuteWithPolicy(
+                        async () => await poisonHandler.Invoke(body.ToArray(), props, info)
+                    );
+                }
+            };
         }
+    }
 
-        private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
+    private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
         {
             var queue = await _busClient.QueueDeclareAsync(
                             name: bindingInfo.Queue.Name,
@@ -485,95 +387,95 @@ namespace ATI.Services.RabbitMQ
                             durable: bindingInfo.Queue.IsDurable,
                             exclusive: bindingInfo.Queue.IsExclusive);
 
-            var exchange = new Exchange(bindingInfo.Exchange.Name,
-                                        bindingInfo.Exchange.Type,
-                                        bindingInfo.Queue.IsDurable,
-                                        bindingInfo.Queue.IsAutoDelete);
+        var exchange = new Exchange(bindingInfo.Exchange.Name,
+                                    bindingInfo.Exchange.Type,
+                                    bindingInfo.Queue.IsDurable,
+                                    bindingInfo.Queue.IsAutoDelete);
 
-            await _busClient.BindAsync(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
-            return queue;
-        }
+        await _busClient.BindAsync(exchange, bindingInfo.Queue, bindingInfo.RoutingKey);
+        return queue;
+    }
 
-        private void HandleMessageProps(MessageProperties props)
-        {
-            if (!props.HeadersPresent)
-                return;
+    private void HandleMessageProps(MessageProperties props)
+    {
+        if (!props.HeadersPresent)
+            return;
 
-            GetAcceptLanguageFromProperties(props);
-        }
+        GetAcceptLanguageFromProperties(props);
+    }
 
 #nullable enable
-        private async Task<AckStrategy> HandleNackResponse(
-            QueueExchangeBinding mainQueueBinding,
-            QueueExchangeBinding delayQueueBinding,
-            QueueExchangeBinding poisonQueueBinding,
-            DelayedRequeueConfiguration delayedConfig,
-            MessageProperties props,
-            byte[] body)
+    private async Task<AckStrategy> HandleNackResponse(
+        QueueExchangeBinding mainQueueBinding,
+        QueueExchangeBinding delayQueueBinding,
+        QueueExchangeBinding poisonQueueBinding,
+        DelayedRequeueConfiguration delayedConfig,
+        MessageProperties props,
+        byte[] body)
+    {
+        var counter = props.Headers.TryGetValue("x-counter", out object? xCounterHeader)
+                      && int.TryParse(xCounterHeader?.ToString(), out int headerCounter)
+            ? headerCounter
+            : 0;
+
+        if (counter >= delayedConfig.MaxRetryRequeueCount)
         {
-            var counter = props.Headers.TryGetValue("x-counter", out object? xCounterHeader)
-                          && int.TryParse(xCounterHeader.ToString(), out int headerCounter)
-                ? headerCounter
-                : 0;
-
-            if (counter >= delayedConfig.MaxRetryRequeueCount)
-            {
-                await PublishToPoisonQueueAsync(poisonQueueBinding, body);
-            }
-            else
-            {
-                await PublishToDelayQueueAsync(
-                    delayQueueBinding,
-                    mainQueueBinding,
-                    counter,
-                    delayedConfig.DelayedQueueRequeueTtl,
-                    body);
-            }
-
-            return AckStrategies.Ack;
+            await PublishToPoisonQueueAsync(poisonQueueBinding, body);
         }
+        else
+        {
+            await PublishToDelayQueueAsync(
+                delayQueueBinding,
+                mainQueueBinding,
+                counter,
+                delayedConfig.DelayedQueueRequeueTtl,
+                body);
+        }
+
+        return AckStrategies.Ack;
+    }
 #nullable disable
 
-        private async Task PublishToPoisonQueueAsync(QueueExchangeBinding poisonQueueBinding, byte[] messageBody)
+    private async Task PublishToPoisonQueueAsync(QueueExchangeBinding poisonQueueBinding, byte[] messageBody)
+    {
+        try
         {
-            try
-            {
-                await _busClient.QueueDeclareAsync(
-                    poisonQueueBinding.Queue.Name,
-                    c => c.AsAutoDelete(poisonQueueBinding.Queue.IsAutoDelete)
-                        .AsDurable(poisonQueueBinding.Queue.IsDurable)
-                        .AsExclusive(poisonQueueBinding.Queue.IsExclusive));
-            }
-            catch (Exception exception)
-            {
-                _logger.ErrorWithObject(
-                    exception,
-                    "Не удалось создать очередь задержки."
-                );
-
-                return;
-            }
-
-            var delayExchange = await _busClient.ExchangeDeclareAsync(
-                poisonQueueBinding.Exchange.Name,
-                poisonQueueBinding.Exchange.Type);
-
-            await _busClient.BindAsync(delayExchange, poisonQueueBinding.Queue, poisonQueueBinding.RoutingKey);
-            await SetupPolicy().ExecuteAndCaptureAsync(async () =>
-                await _busClient.PublishAsync(
-                    delayExchange,
-                    poisonQueueBinding.RoutingKey,
-                    false,
-                    GetProperties(null, true),
-                    messageBody)
+            await _busClient.QueueDeclareAsync(
+                poisonQueueBinding.Queue.Name,
+                c => c.AsAutoDelete(poisonQueueBinding.Queue.IsAutoDelete)
+                    .AsDurable(poisonQueueBinding.Queue.IsDurable)
+                    .AsExclusive(poisonQueueBinding.Queue.IsExclusive));
+        }
+        catch (Exception exception)
+        {
+            _logger.ErrorWithObject(
+                exception,
+                "Не удалось создать очередь задержки."
             );
+
+            return;
         }
 
-        private async Task PublishToDelayQueueAsync(
+        var delayExchange = await _busClient.ExchangeDeclareAsync(
+            poisonQueueBinding.Exchange.Name,
+            poisonQueueBinding.Exchange.Type);
+
+        await _busClient.BindAsync(delayExchange, poisonQueueBinding.Queue, poisonQueueBinding.RoutingKey);
+        await SetupPolicy().ExecuteAndCaptureAsync(async () =>
+            await _busClient.PublishAsync(
+                delayExchange,
+                poisonQueueBinding.RoutingKey,
+                false,
+                GetProperties(null, true),
+                messageBody)
+        );
+    }
+
+    private async Task PublishToDelayQueueAsync(
         QueueExchangeBinding delayQueueBinding,
         QueueExchangeBinding mainQueue,
         int counter,
-        int  delayedQueueRequeueTtl,
+        int delayedQueueRequeueTtl,
         byte[] messageBody)
     {
         try
@@ -617,94 +519,93 @@ namespace ATI.Services.RabbitMQ
     }
 
     private void GetAcceptLanguageFromProperties(MessageProperties props)
+    {
+        try
         {
-            try
-            {
-                if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
-                    return;
-
-                var acceptLanguageStr = BodyEncoding.GetString((byte[])acceptLanguage);
-                FlowContext<RequestMetaData>.Current =
-                    new RequestMetaData
-                    {
-                        RabbitAcceptLanguage = acceptLanguageStr
-                    };
-
-                if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
-                    CultureInfo.CurrentUICulture = cultureInfo;
-            }
-            catch (Exception e)
-            {
-                _logger.ErrorWithObject(e, message: "Error while parsing accept_language from properties", props);
-            }
-        }
-
-        private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
-        {
-            var messageProperties = new MessageProperties
-            {
-                AppId = ServiceVariables.ServiceAsClientName
-            };
-
-            SetTraceHeadersFromActivity(messageProperties);
-            if (withAcceptLang)
-                SetAcceptLanguageHeader(messageProperties);
-
-            if (additionalHeaders != null)
-            {
-                foreach (var additionalHeader in additionalHeaders)
-                {
-                    messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
-                }
-            }
-
-            return messageProperties;
-        }
-
-        private void SetTraceHeadersFromActivity(MessageProperties properties)
-        {
-            if (Activity.Current is not { Baggage: { } bgg })
+            if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
                 return;
 
-            var baggageArray = bgg.ToArray();
-            if (baggageArray.Length == 0)
-                return;
-
-            var baggageProperties = baggageArray
-                .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
-
-            properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
-        }
-
-        private void SetAcceptLanguageHeader(MessageProperties properties)
-        {
-            var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
-            if (flowAcceptLang != null)
-                properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
-        }
-
-        public void Dispose()
-        {
-            // Сделано для удобства локального тестирования, удаляем наши созданные очереди
-            if (_options.DeleteQueuesOnApplicationShutdown && _busClient != null)
-            {
-                foreach (var queue in RabbitMqDeclaredQueues.DeclaredQueues)
+            var acceptLanguageStr = BodyEncoding.GetString((byte[]) acceptLanguage);
+            FlowContext<RequestMetaData>.Current =
+                new RequestMetaData
                 {
-                    _busClient.QueueDelete(queue.Name);
-                }
+                    RabbitAcceptLanguage = acceptLanguageStr
+                };
+
+            if (LocaleHelper.TryGetFromString(acceptLanguageStr, out var cultureInfo))
+                CultureInfo.CurrentUICulture = cultureInfo;
+        }
+        catch (Exception e)
+        {
+            _logger.ErrorWithObject(e, message: "Error while parsing accept_language from properties", props);
+        }
+    }
+
+    private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
+    {
+        var messageProperties = new MessageProperties
+        {
+            AppId = ServiceVariables.ServiceAsClientName
+        };
+
+        SetTraceHeadersFromActivity(messageProperties);
+        if (withAcceptLang)
+            SetAcceptLanguageHeader(messageProperties);
+
+        if (additionalHeaders != null)
+        {
+            foreach (var additionalHeader in additionalHeaders)
+            {
+                messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
             }
-
-            _busClient?.Dispose();
         }
 
-        public string InitStartConsoleMessage()
+        return messageProperties;
+    }
+
+    private void SetTraceHeadersFromActivity(MessageProperties properties)
+    {
+        if (Activity.Current is not { Baggage: { } bgg })
+            return;
+
+        var baggageArray = bgg.ToArray();
+        if (baggageArray.Length == 0)
+            return;
+
+        var baggageProperties = baggageArray
+            .Select(b => $"{WebUtility.UrlEncode(b.Key)}={WebUtility.UrlEncode(b.Value)}");
+
+        properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
+    }
+
+    private void SetAcceptLanguageHeader(MessageProperties properties)
+    {
+        var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
+        if (flowAcceptLang != null)
+            properties.Headers.Add(MessagePropertiesNames.AcceptLang, flowAcceptLang);
+    }
+
+    public void Dispose()
+    {
+        // Сделано для удобства локального тестирования, удаляем наши созданные очереди
+        if (_options.DeleteQueuesOnApplicationShutdown && _busClient != null)
         {
-            return "Start Eventbus initializer";
+            foreach (var queue in RabbitMqDeclaredQueues.DeclaredQueues)
+            {
+                _busClient.QueueDelete(queue.Name);
+            }
         }
 
-        public string InitEndConsoleMessage()
-        {
-            return "End Eventbus initializer";
-        }
+        _busClient?.Dispose();
+    }
+
+    public string InitStartConsoleMessage()
+    {
+        return "Start Eventbus initializer";
+    }
+
+    public string InitEndConsoleMessage()
+    {
+        return "End Eventbus initializer";
     }
 }
