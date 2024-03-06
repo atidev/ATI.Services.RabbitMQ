@@ -102,7 +102,7 @@ public class EventbusManager : IDisposable, IInitializer
     {
         try
         {
-            var values = typeof(ExchangeType).GetProperties()
+            var values = typeof(ExchangeType).GetFields()
                 .Select(p => (string)p.GetValue(null));
             if (values is null || values.All(t => t != type))
             {
