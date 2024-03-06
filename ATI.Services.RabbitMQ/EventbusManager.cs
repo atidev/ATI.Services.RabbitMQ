@@ -93,6 +93,9 @@ public class EventbusManager : IDisposable, IInitializer
 
     public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) => 
         _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
+    
+    public Task<Exchange> DeclareExchangeTypedAsync(string exchangeName,bool durable, bool autoDelete, 
+        string type = ExchangeType.Topic) => _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
 
     public async Task PublishRawAsync(
         string publishBody,
