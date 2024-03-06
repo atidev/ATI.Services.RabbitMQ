@@ -94,31 +94,8 @@ public class EventbusManager : IDisposable, IInitializer
     public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) => 
         _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
     
-    public Task<Exchange> DeclareExchangeTypedAsync(
-        string exchangeName, 
-        bool durable, 
-        bool autoDelete, 
-        string type = ExchangeType.Topic)
-    {
-        try
-        {
-            var values = typeof(ExchangeType).GetFields()
-                .Select(p => (string)p.GetValue(null));
-            if (values is null || values.All(t => t != type))
-            {
-                throw new ArgumentOutOfRangeException(
-                    paramName: nameof(type),
-                    message: $"Passed exchange type does not exist in class {nameof(ExchangeType)}");
-            }
-
-            return _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex);
-            return DeclareExchangeTopicAsync(exchangeName, durable, autoDelete);
-        }
-    }
+    public Task<Exchange> DeclareExchangeTypedAsync(string exchangeName,bool durable, bool autoDelete, 
+        string type = ExchangeType.Topic) => _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
 
     public async Task PublishRawAsync(
         string publishBody,
