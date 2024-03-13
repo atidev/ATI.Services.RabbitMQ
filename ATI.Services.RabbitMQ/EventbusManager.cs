@@ -194,18 +194,19 @@ public class EventbusManager : IDisposable, IInitializer
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
         //wait for 1 sec to return else subscribe in background
-        return _subscribePolicy.ExecuteAsync(async () =>
-                               {
-                                   var consumer = await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
-                                   _subscriptions.Add(new SubscriptionInfo
-                                   {
-                                       Binding = bindingInfo,
-                                       Consumer = consumer,
-                                       EventbusSubscriptionHandler = handler,
-                                       MetricsEntity = metricEntity
-                                   });
-                               })
-                               .WaitAsync(TimeSpan.FromSeconds(1));
+        return Task.WhenAny(
+            Task.Delay(TimeSpan.FromSeconds(1)),
+            _subscribePolicy.ExecuteAsync(async () =>
+            {
+                var consumer = await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
+                _subscriptions.Add(new SubscriptionInfo
+                {
+                    Binding = bindingInfo,
+                    Consumer = consumer,
+                    EventbusSubscriptionHandler = handler,
+                    MetricsEntity = metricEntity
+                });
+            }));
     }
 
     private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
