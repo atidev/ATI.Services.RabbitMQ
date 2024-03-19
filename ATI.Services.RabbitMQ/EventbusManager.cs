@@ -52,8 +52,7 @@ public class EventbusManager : IDisposable, IInitializer
     private static readonly UTF8Encoding BodyEncoding = new(false);
     private readonly RmqTopology _rmqTopology;
 
-    public EventbusManager(JsonSerializer jsonSerializer,
-                           IOptions<EventbusOptions> options, RmqTopology rmqTopology)
+    public EventbusManager(JsonSerializer jsonSerializer, IOptions<EventbusOptions> options, RmqTopology rmqTopology)
     {
         _options = options.Value;
         _connectionString = options.Value.ConnectionString;
@@ -61,15 +60,14 @@ public class EventbusManager : IDisposable, IInitializer
         _rmqTopology = rmqTopology;
 
         _subscribePolicy = Policy.Handle<Exception>()
-                                 .WaitAndRetryForeverAsync(
-                                     _ => _options.RabbitConnectInterval,
-                                     (exception, _) => _logger.Error(exception));
+                                 .WaitAndRetryForeverAsync(_ => _options.RabbitConnectInterval,
+                                                           (exception, _) => _logger.Error(exception));
 
         _retryForeverPolicy =
             Policy.Handle<Exception>()
                   .WaitAndRetryForeverAsync(
                       retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
-                      (exception, _) => _logger.ErrorWithObject(exception));
+                      (exception, _) => _logger.Error(exception));
     }
 
     public Task InitializeAsync()
@@ -83,8 +81,9 @@ public class EventbusManager : IDisposable, IInitializer
                                                        new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options));
                                                }).Advanced;
 
-            _busClient.Connected += async (_, _) => await ResubscribeOnReconnect();
-            _busClient.Disconnected += (_, _) => { _logger.Error("Disconnected from RMQ for some reason!"); };
+            _busClient.Connected += (_, _) => ResubscribeOnReconnect();
+            _busClient.Disconnected += (_, b) => _logger.ErrorWithObject(
+                "Disconnected from RMQ for some reason!", b.Hostname, b.Port, b.Reason, b.Type.ToString("G"));
         }
         catch (Exception exception)
         {
@@ -96,6 +95,9 @@ public class EventbusManager : IDisposable, IInitializer
 
     public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) =>
         _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
+    
+    public Task<Exchange> DeclareExchangeTypedAsync(string exchangeName,bool durable, bool autoDelete, 
+        string type = ExchangeType.Topic) => _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
 
     public async Task PublishRawAsync(
         string publishBody,
@@ -187,31 +189,26 @@ public class EventbusManager : IDisposable, IInitializer
         return SubscribeAsync(binding, handler, metricEntity);
     }
 
-    public async Task SubscribeAsync(
-        QueueExchangeBinding bindingInfo,
-        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-        string metricEntity = null)
+    public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
+                               Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+                               string metricEntity = null)
     {
-        _subscriptions.Add(new SubscriptionInfo
-        {
-            Binding = bindingInfo,
-            EventbusSubscriptionHandler = handler,
-            MetricsEntity = metricEntity
-        });
-
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
-        try
-        {
-            await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
-        }
-        catch (Exception ex)
-        {
-            _logger.ErrorWithObject(ex,
-                                    "Initial subscription failed, trying to subscribe in background",
-                                    logObjects: bindingInfo.Queue.Name);
-            _subscribePolicy.ExecuteAsync(() => SubscribePrivateAsync(bindingInfo, handler, metricEntity)).Forget();
-        }
+        //wait for 1 sec to return else subscribe in background
+        return Task.WhenAny(
+            Task.Delay(TimeSpan.FromSeconds(1)),
+            _subscribePolicy.ExecuteAsync(async () =>
+            {
+                var consumer = await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
+                _subscriptions.Add(new SubscriptionInfo
+                {
+                    Binding = bindingInfo,
+                    Consumer = consumer,
+                    EventbusSubscriptionHandler = handler,
+                    MetricsEntity = metricEntity
+                });
+            }));
     }
 
     private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
@@ -239,67 +236,65 @@ public class EventbusManager : IDisposable, IInitializer
     }
 
     private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
+    {
+        var policy = Policy.Handle<TimeoutException>()
+                           .WaitAndRetryAsync(
+                                RetryAttemptMax,
+                                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                                (exception, timeSpan, retryCount, _) =>
+                                {
+                                    _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
+                                }
+                            );
+
+        var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
+
+        if (policyResult.FinalException != null)
         {
-            var policy = Policy.Handle<TimeoutException>()
-                .WaitAndRetryAsync(
-                    RetryAttemptMax,
-                    retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                    (exception, timeSpan, retryCount, _) =>
-                    {
-                        _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
-                    });
-
-            var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
-
-            if (policyResult.FinalException != null)
-            {
-                _logger.ErrorWithObject(policyResult.FinalException, action);
-            }
-
-            return policyResult.Result;
+            _logger.ErrorWithObject(policyResult.FinalException, action);
         }
 
-    private async Task ResubscribeOnReconnect()
+        return policyResult.Result;
+    }
+
+    private void ResubscribeOnReconnect()
     {
-        _logger.Warn("Reconnect happened, start resubscribing");
+        _logger.Warn("Connected to rmq");
+
         foreach (var subscription in _subscriptions)
         {
-            try
-            {
-                await ResubscribeInternalAsync(subscription);
-            }
-            catch (Exception e)
-            {
-                _logger.ErrorWithObject(e, "Failed to resubscribe", logObjects: subscription.Binding.Queue.Name);
-                _retryForeverPolicy.ExecuteAsync(() => ResubscribeInternalAsync(subscription)).Forget();
-            }
-        }
+            _logger.WarnWithObject("Acquire resubscribing lock", subscription.Binding.Exchange, subscription.Binding.RoutingKey);
 
-        async Task ResubscribeInternalAsync(SubscriptionInfo sub)
-        {
-            if (sub.Binding.Queue.IsExclusive)
+            lock (subscription.ResubscribeLock)
             {
-                await SubscribePrivateAsync(sub.Binding,
-                                            sub.EventbusSubscriptionHandler,
-                                            sub.MetricsEntity);
-            }
-            else
-            {
-                // for non exclusive queues we reuse existing consumer
-                // alternative is to dispose old consumer and create new consumer
-                await DeclareBindQueue(sub.Binding);
+                if (subscription.ResubscribeTask is { IsCompleted: false })
+                    continue;
+
+                _logger.WarnWithObject("Acquired lock, start resubscribing", subscription.Binding.Exchange, subscription.Binding.RoutingKey);
+
+                subscription.ResubscribeTask = _retryForeverPolicy.ExecuteAsync(
+                    async () =>
+                    {
+                        var newConsumer = await SubscribePrivateAsync(subscription.Binding,
+                                                                      subscription.EventbusSubscriptionHandler,
+                                                                      subscription.MetricsEntity);
+                        subscription.Consumer.Dispose();
+                        subscription.Consumer = newConsumer;
+                    });
             }
         }
     }
 
-    private async Task SubscribePrivateAsync(
+    private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
         Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
         string metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
-        _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
+        var consumer = _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
 
+        return consumer;
+        
         async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
         {
             using (_inMetricsFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
@@ -595,17 +590,13 @@ public class EventbusManager : IDisposable, IInitializer
                 _busClient.QueueDelete(queue.Name);
             }
         }
+        
+        foreach (var subscription in _subscriptions) 
+            subscription.Consumer.Dispose();
 
         _busClient?.Dispose();
     }
 
-    public string InitStartConsoleMessage()
-    {
-        return "Start Eventbus initializer";
-    }
-
-    public string InitEndConsoleMessage()
-    {
-        return "End Eventbus initializer";
-    }
+    public string InitStartConsoleMessage() => "Start Eventbus initializer";
+    public string InitEndConsoleMessage() => "End Eventbus initializer";
 }

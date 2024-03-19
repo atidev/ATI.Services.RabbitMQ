@@ -2,13 +2,15 @@
 using System.Threading.Tasks;
 using EasyNetQ;
 
-namespace ATI.Services.RabbitMQ
-{
-    public class SubscriptionInfo
-    {
-        public QueueExchangeBinding Binding { get; set; }
-        public Func<byte[], MessageProperties, MessageReceivedInfo, Task> EventbusSubscriptionHandler { get; set; }
+namespace ATI.Services.RabbitMQ;
 
-        public string MetricsEntity { get; set; }
-    }
+public class SubscriptionInfo
+{
+    public QueueExchangeBinding Binding { get; set; }
+    public Func<byte[], MessageProperties, MessageReceivedInfo, Task> EventbusSubscriptionHandler { get; set; }
+    public string MetricsEntity { get; set; }
+    public IDisposable Consumer { get; set; }
+
+    public Task ResubscribeTask { get; set; }
+    public object ResubscribeLock { get; } = new();
 }
