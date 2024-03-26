@@ -41,8 +41,8 @@ public class EventbusManager : IDisposable, IInitializer
     private readonly JsonSerializer _jsonSerializer;
     private readonly string _connectionString;
 
-    private readonly MetricsFactory _inMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Subscribe, nameof(EventbusManager), additionalSummaryLabels: "rmq_app_id");
-    private readonly MetricsFactory _outMetricsFactory = MetricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Publish, nameof(EventbusManager));
+    private readonly MetricsInstance _inMetrics;
+    private readonly MetricsInstance _outMetrics;
 
     private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
     private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
@@ -52,12 +52,19 @@ public class EventbusManager : IDisposable, IInitializer
     private static readonly UTF8Encoding BodyEncoding = new(false);
     private readonly RmqTopology _rmqTopology;
 
-    public EventbusManager(JsonSerializer jsonSerializer, IOptions<EventbusOptions> options, RmqTopology rmqTopology)
+    public EventbusManager(
+        JsonSerializer jsonSerializer, 
+        IOptions<EventbusOptions> options, 
+        RmqTopology rmqTopology,
+        MetricsFactory metricsFactory)
     {
         _options = options.Value;
         _connectionString = options.Value.ConnectionString;
         _jsonSerializer = jsonSerializer;
         _rmqTopology = rmqTopology;
+        
+        _inMetrics = metricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Subscribe, nameof(EventbusManager), additionalSummaryLabels: "rmq_app_id");
+        _outMetrics = metricsFactory.CreateRabbitMqMetricsFactory(RabbitMetricsType.Publish, nameof(EventbusManager));
 
         _subscribePolicy = Policy.Handle<Exception>()
                                  .WaitAndRetryForeverAsync(_ => _options.RabbitConnectInterval,
@@ -113,7 +120,7 @@ public class EventbusManager : IDisposable, IInitializer
             string.IsNullOrWhiteSpace(publishBody))
             return;
 
-        using (_outMetricsFactory.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
+        using (_outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
         {
             var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
             var exchange = new Exchange(exchangeName);
@@ -150,7 +157,7 @@ public class EventbusManager : IDisposable, IInitializer
             publishObject == null)
             return;
 
-        using (_outMetricsFactory.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
+        using (_outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
         {
             var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
             var exchange = new Exchange(exchangeName);
@@ -297,7 +304,7 @@ public class EventbusManager : IDisposable, IInitializer
         
         async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
         {
-            using (_inMetricsFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
+            using (_inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
                                                                $"{info.Exchange}:{info.RoutingKey}",
                                                                additionalLabels: props.AppId ?? "Unknown"))
             {
@@ -329,7 +336,7 @@ public class EventbusManager : IDisposable, IInitializer
         {
             return async (body, props, info) =>
             {
-                using (_inMetricsFactory.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
+                using (_inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
                            $"{info.Exchange}:{info.RoutingKey}",
                            additionalLabels: props.AppId ?? "Unknown"))
                 {
@@ -362,7 +369,7 @@ public class EventbusManager : IDisposable, IInitializer
         {
             return async (body, props, info) =>
             {
-                using (_outMetricsFactory.CreateLoggingMetricsTimer($"{metricEntity ?? "Eventbus"}-Poison", $"{info.Exchange}:{info.RoutingKey}",
+                using (_outMetrics.CreateLoggingMetricsTimer($"{metricEntity ?? "Eventbus"}-Poison", $"{info.Exchange}:{info.RoutingKey}",
                            additionalLabels: props.AppId ?? "Unknown"))
                 {
                     HandleMessageProps(props);
