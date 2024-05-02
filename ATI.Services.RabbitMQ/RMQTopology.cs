@@ -1,6 +1,4 @@
-﻿using System;
-using System.Linq;
-using System.Net;
+﻿using System.Net;
 using ATI.Services.Common.Behaviors;
 using ATI.Services.Common.Extensions;
 using EasyNetQ.Topology;
