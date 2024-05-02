@@ -26,6 +26,7 @@ public class RmqTopology
     /// <param name="isExclusiveQueueName">Если true, то к имени очереди добавится постфикс с именем машины+порт</param>
     /// <param name="isExclusive"></param>
     /// <param name="customQueueName"></param>
+    /// <param name="entityName">Будет в названии очереди вместо exchangeName</param>
     /// <returns></returns>
     public QueueExchangeBinding CreateBinding(
         string exchangeName,
@@ -34,10 +35,12 @@ public class RmqTopology
         bool isDurable,
         bool isAutoDelete,
         bool isExclusiveQueueName = false,
-        string customQueueName = null)
+        string customQueueName = null,
+        string entityName = null)
     {
         var queueName =
-            EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName);
+            EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName,
+                entityName: entityName);
 
         var createdQueue = new Queue(queueName, isDurable, isExclusive, isAutoDelete);
 
@@ -51,13 +54,19 @@ public class RmqTopology
 
     private readonly string _queuePostfixName = $"-{Dns.GetHostName()}-{ConfigurationManager.GetApplicationPort()}";
 
-    private string EventbusQueueNameTemplate(string rabbitService, string routingKey,
-        string customQueueName, bool isExclusiveQueueName)
+    private string EventbusQueueNameTemplate(
+        string rabbitService, 
+        string routingKey,
+        string customQueueName, 
+        bool isExclusiveQueueName,
+        string entityName = null)
     {
+        //отделяем env от exchangeName
+        var exchangeNameWithoutEnv = rabbitService.Split(".")[1];
         var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}." +
                         (!customQueueName.IsNullOrEmpty()
                             ? customQueueName
-                            : $"{_eventbusOptions.ServiceName}.{rabbitService}.{routingKey}");
+                            : $"{_eventbusOptions.ServiceName}." + $"{entityName ?? exchangeNameWithoutEnv}." + $"{routingKey}");
 
 
         if (_eventbusOptions.AddHostnamePostfixToQueues || isExclusiveQueueName)
