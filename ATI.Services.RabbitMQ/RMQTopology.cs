@@ -27,6 +27,7 @@ public class RmqTopology
     /// <param name="isExclusive"></param>
     /// <param name="customQueueName"></param>
     /// <param name="entityName">Будет в названии очереди вместо exchangeName</param>
+    /// <param name="queueType">Queue type "classic" or "quorum"</param>
     /// <returns></returns>
     public QueueExchangeBinding CreateBinding(
         string exchangeName,
@@ -36,7 +37,8 @@ public class RmqTopology
         bool isAutoDelete,
         bool isExclusiveQueueName = false,
         string customQueueName = null,
-        string entityName = null)
+        string entityName = null,
+        string queueType = EasyNetQ.QueueType.Quorum)
     {
         var queueName =
             EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName,
@@ -49,7 +51,7 @@ public class RmqTopology
             Name = exchangeName,
             Type = ExchangeType.Topic
         };
-        return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey);
+        return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey, queueType);
     }
 
     private readonly string _queuePostfixName = $"-{Dns.GetHostName()}-{ConfigurationManager.GetApplicationPort()}";
