@@ -1,18 +1,18 @@
 ﻿using EasyNetQ.Topology;
 
-namespace ATI.Services.RabbitMQ
-{
-    public class QueueExchangeBinding
-    {
-        public QueueExchangeBinding(ExchangeInfo exchange, Queue queue, string routingKey)
-        {
-            Queue = queue;
-            RoutingKey = routingKey;
-            Exchange = exchange;
-        }
+namespace ATI.Services.RabbitMQ;
 
-        public Queue Queue { get; }
-        public string RoutingKey { get; }
-        public ExchangeInfo Exchange { get; }
+public class QueueExchangeBinding
+{
+    public QueueExchangeBinding(ExchangeInfo exchange, Queue queue, string routingKey)
+    {
+        Queue = queue;
+        RoutingKey = routingKey;
+        Exchange = exchange;
     }
+
+    public Queue Queue { get; }
+    public string RoutingKey { get; }
+    public ExchangeInfo Exchange { get; }
+    public string QueueType { get; set; } = EasyNetQ.QueueType.Quorum;
 }
