@@ -63,7 +63,7 @@ public class RmqTopology
         bool isExclusiveQueueName,
         string entityName = null)
     {
-        var exchangeNameWithoutEnv = "";
+        var exchangeNameWithoutEnv = string.Empty;
         if (entityName is null)
         {
             //отделяем env от exchangeName
