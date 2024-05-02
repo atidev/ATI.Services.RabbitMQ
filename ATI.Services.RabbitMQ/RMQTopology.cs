@@ -62,7 +62,11 @@ public class RmqTopology
         string entityName = null)
     {
         //отделяем env от exchangeName
-        var exchangeNameWithoutEnv = rabbitService.Split(".")[1];
+        var exchangeNameWithoutEnv =
+            rabbitService.Split(".") is [_, var exchangeName, ..] && !string.IsNullOrEmpty(exchangeName)
+                ? exchangeName
+                : rabbitService;
+        
         var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}." +
                         (!customQueueName.IsNullOrEmpty()
                             ? customQueueName
