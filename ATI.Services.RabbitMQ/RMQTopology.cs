@@ -1,4 +1,6 @@
-﻿using System.Net;
+﻿using System;
+using System.Linq;
+using System.Net;
 using ATI.Services.Common.Behaviors;
 using ATI.Services.Common.Extensions;
 using EasyNetQ.Topology;
@@ -62,10 +64,9 @@ public class RmqTopology
         string entityName = null)
     {
         //отделяем env от exchangeName
-        var exchangeNameWithoutEnv =
-            rabbitService.Split(".") is [_, var exchangeName, ..] && !string.IsNullOrEmpty(exchangeName)
-                ? exchangeName
-                : rabbitService;
+        var exchangeNameWithoutEnv = rabbitService[(rabbitService.IndexOf('.') + 1)..];
+        if (string.IsNullOrEmpty(exchangeNameWithoutEnv))
+            exchangeNameWithoutEnv = rabbitService;
         
         var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}." +
                         (!customQueueName.IsNullOrEmpty()
