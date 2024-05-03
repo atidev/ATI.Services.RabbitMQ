@@ -63,8 +63,8 @@ public class RmqTopology
         bool isExclusiveQueueName,
         string entityName = null)
     {
-        var exchangeNameWithoutEnv = string.Empty;
-        if (entityName is null)
+        var exchangeNameWithoutEnv = entityName;
+        if (exchangeNameWithoutEnv is null)
         {
             //отделяем env от exchangeName
             exchangeNameWithoutEnv = rabbitService[(rabbitService.IndexOf('.') + 1)..];
@@ -72,10 +72,11 @@ public class RmqTopology
                 exchangeNameWithoutEnv = rabbitService;
         }
         
-        var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}." +
-                        (!customQueueName.IsNullOrEmpty()
-                            ? customQueueName
-                            : $"{_eventbusOptions.ServiceName}." + $"{entityName ?? exchangeNameWithoutEnv}." + $"{routingKey}");
+        var queueSuffix = customQueueName.IsNullOrEmpty()
+            ? $"{_eventbusOptions.ServiceName}.{exchangeNameWithoutEnv}.{routingKey}"
+            : customQueueName;
+        
+        var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}.{queueSuffix}";
 
 
         if (_eventbusOptions.AddHostnamePostfixToQueues || isExclusiveQueueName)
