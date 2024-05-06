@@ -382,12 +382,12 @@ public class EventbusManager : IDisposable, IInitializer
     }
 
     private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
-        {
-            var queue = await _busClient.QueueDeclareAsync(
-                            name: bindingInfo.Queue.Name,
-                            autoDelete: bindingInfo.Queue.IsAutoDelete,
-                            durable: bindingInfo.Queue.IsDurable,
-                            exclusive: bindingInfo.Queue.IsExclusive);
+    {
+        var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name,
+                                                       c => c.AsAutoDelete(bindingInfo.Queue.IsAutoDelete)
+                                                             .AsDurable(bindingInfo.Queue.IsDurable)
+                                                             .AsExclusive(bindingInfo.Queue.IsExclusive)
+                                                             .WithQueueType(bindingInfo.QueueType));
 
         var exchange = new Exchange(bindingInfo.Exchange.Name,
                                     bindingInfo.Exchange.Type,
@@ -445,8 +445,9 @@ public class EventbusManager : IDisposable, IInitializer
             await _busClient.QueueDeclareAsync(
                 poisonQueueBinding.Queue.Name,
                 c => c.AsAutoDelete(poisonQueueBinding.Queue.IsAutoDelete)
-                    .AsDurable(poisonQueueBinding.Queue.IsDurable)
-                    .AsExclusive(poisonQueueBinding.Queue.IsExclusive));
+                      .AsDurable(poisonQueueBinding.Queue.IsDurable)
+                      .AsExclusive(poisonQueueBinding.Queue.IsExclusive)
+                      .WithQueueType(poisonQueueBinding.QueueType));
         }
         catch (Exception exception)
         {
@@ -485,11 +486,12 @@ public class EventbusManager : IDisposable, IInitializer
             await _busClient.QueueDeclareAsync(
                 delayQueueBinding.Queue.Name,
                 c => c.WithArgument("x-dead-letter-exchange", String.Empty)
-                    .WithArgument("x-dead-letter-routing-key", mainQueue.Queue.Name)
-                    .WithArgument("x-message-ttl", delayedQueueRequeueTtl)
-                    .AsAutoDelete(delayQueueBinding.Queue.IsAutoDelete)
-                    .AsDurable(delayQueueBinding.Queue.IsDurable)
-                    .AsExclusive(delayQueueBinding.Queue.IsExclusive));
+                      .WithArgument("x-dead-letter-routing-key", mainQueue.Queue.Name)
+                      .WithArgument("x-message-ttl", delayedQueueRequeueTtl)
+                      .AsAutoDelete(delayQueueBinding.Queue.IsAutoDelete)
+                      .AsDurable(delayQueueBinding.Queue.IsDurable)
+                      .AsExclusive(delayQueueBinding.Queue.IsExclusive)
+                      .WithQueueType(delayQueueBinding.QueueType));
         }
         catch (Exception exception)
         {
