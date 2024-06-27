@@ -200,6 +200,20 @@ public class EventbusManager : IDisposable, IInitializer
                                Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
                                string metricEntity = null)
     {
+        return SubscribeAsync(bindingInfo,
+                              async (body, props, info) =>
+                              {
+                                  await handler(body, props, info);
+                                  return AckStrategies.Ack;
+                              },
+                              metricEntity);
+    }
+
+    public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
+                               Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
+                               string metricEntity = null,
+                               Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
+    {
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
         //wait for 1 sec to return else subscribe in background
@@ -207,12 +221,13 @@ public class EventbusManager : IDisposable, IInitializer
             Task.Delay(TimeSpan.FromSeconds(1)),
             _subscribePolicy.ExecuteAsync(async () =>
             {
-                var consumer = await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
+                var consumer = await SubscribePrivateAsync(bindingInfo, handler, consumerConfiguration, metricEntity);
                 _subscriptions.Add(new SubscriptionInfo
                 {
                     Binding = bindingInfo,
                     Consumer = consumer,
                     EventbusSubscriptionHandler = handler,
+                    ConsumerConfiguration = consumerConfiguration,
                     MetricsEntity = metricEntity
                 });
             }));
@@ -222,25 +237,6 @@ public class EventbusManager : IDisposable, IInitializer
         Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
             Policy.Handle<Exception>()
                 .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
-
-    private async Task ExecuteWithPolicy(Func<Task> action)
-    {
-        var policy = Policy.Handle<TimeoutException>()
-            .WaitAndRetryAsync(
-                RetryAttemptMax,
-                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                (exception, timeSpan, retryCount, _) =>
-                {
-                    _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
-                });
-
-        var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
-
-        if (policyResult.FinalException != null)
-        {
-            _logger.ErrorWithObject(policyResult.FinalException, action);
-        }
-    }
 
     private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
     {
@@ -284,6 +280,7 @@ public class EventbusManager : IDisposable, IInitializer
                     {
                         var newConsumer = await SubscribePrivateAsync(subscription.Binding,
                                                                       subscription.EventbusSubscriptionHandler,
+                                                                      consumerConfiguration: subscription.ConsumerConfiguration,
                                                                       subscription.MetricsEntity);
                         subscription.Consumer.Dispose();
                         subscription.Consumer = newConsumer;
@@ -294,22 +291,34 @@ public class EventbusManager : IDisposable, IInitializer
 
     private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
-        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
+        Action<ISimpleConsumeConfiguration> consumerConfiguration,
         string metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
-        var consumer = _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
+        consumerConfiguration ??= _ => { };
+        var consumer = _busClient.Consume(queue, HandleEventBusMessageWithPolicyAckStrategy, consumerConfiguration);
 
         return consumer;
         
-        async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
+        async Task<AckStrategy> HandleEventBusMessageWithPolicyAckStrategy(ReadOnlyMemory<byte> body,
+                                                                           MessageProperties props,
+                                                                           MessageReceivedInfo info)
         {
             using (_inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
-                                                               $"{info.Exchange}:{info.RoutingKey}",
-                                                               additionalLabels: props.AppId ?? "Unknown"))
+                                                        $"{info.Exchange}:{info.RoutingKey}",
+                                                        additionalLabels: props.AppId ?? "Unknown"))
             {
                 HandleMessageProps(props);
-                await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
+                try
+                {
+                    return await handler(body.ToArray(), props, info);
+                }
+                catch (Exception e)
+                {
+                    _logger.ErrorWithObject(e, "Error while handling eventbus message", new {info.Exchange, info.RoutingKey});
+                    throw;
+                }
             }
         }
     }
