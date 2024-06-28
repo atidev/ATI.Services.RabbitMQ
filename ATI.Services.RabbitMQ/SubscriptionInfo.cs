@@ -16,6 +16,4 @@ public class SubscriptionInfo
 
     public Task ResubscribeTask { get; set; }
     public object ResubscribeLock { get; } = new();
-    
-    public Action<ISimpleConsumeConfiguration> ConsumerConfiguration { get; set; }
 }

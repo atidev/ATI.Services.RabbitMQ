@@ -211,8 +211,7 @@ public class EventbusManager : IDisposable, IInitializer
 
     public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
                                Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
-                               string metricEntity = null,
-                               Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
+                               string metricEntity = null)
     {
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
@@ -221,13 +220,12 @@ public class EventbusManager : IDisposable, IInitializer
             Task.Delay(TimeSpan.FromSeconds(1)),
             _subscribePolicy.ExecuteAsync(async () =>
             {
-                var consumer = await SubscribePrivateAsync(bindingInfo, handler, consumerConfiguration, metricEntity);
+                var consumer = await SubscribePrivateAsync(bindingInfo, handler, metricEntity);
                 _subscriptions.Add(new SubscriptionInfo
                 {
                     Binding = bindingInfo,
                     Consumer = consumer,
                     EventbusSubscriptionHandler = handler,
-                    ConsumerConfiguration = consumerConfiguration,
                     MetricsEntity = metricEntity
                 });
             }));
@@ -280,7 +278,6 @@ public class EventbusManager : IDisposable, IInitializer
                     {
                         var newConsumer = await SubscribePrivateAsync(subscription.Binding,
                                                                       subscription.EventbusSubscriptionHandler,
-                                                                      consumerConfiguration: subscription.ConsumerConfiguration,
                                                                       subscription.MetricsEntity);
                         subscription.Consumer.Dispose();
                         subscription.Consumer = newConsumer;
@@ -292,12 +289,12 @@ public class EventbusManager : IDisposable, IInitializer
     private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
         Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
-        Action<ISimpleConsumeConfiguration> consumerConfiguration,
         string metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
-        consumerConfiguration ??= _ => { };
-        var consumer = _busClient.Consume(queue, HandleEventBusMessageWithPolicyAckStrategy, consumerConfiguration);
+        var consumer = _busClient.Consume(queue,
+                                          HandleEventBusMessageWithPolicyAckStrategy,
+                                          bindingInfo.ConsumerConfiguration ?? (_ => { }));
 
         return consumer;
         
@@ -393,10 +390,14 @@ public class EventbusManager : IDisposable, IInitializer
     private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
     {
         var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name,
-                                                       c => c.AsAutoDelete(bindingInfo.Queue.IsAutoDelete)
-                                                             .AsDurable(bindingInfo.Queue.IsDurable)
-                                                             .AsExclusive(bindingInfo.Queue.IsExclusive)
-                                                             .WithQueueType(bindingInfo.QueueType));
+                                                       c =>
+                                                       {
+                                                           bindingInfo.QueueConfiguration?.Invoke(c);
+                                                           c.AsAutoDelete(bindingInfo.Queue.IsAutoDelete)
+                                                            .AsDurable(bindingInfo.Queue.IsDurable)
+                                                            .AsExclusive(bindingInfo.Queue.IsExclusive)
+                                                            .WithQueueType(bindingInfo.QueueType);
+                                                       });
 
         var exchange = new Exchange(bindingInfo.Exchange.Name,
                                     bindingInfo.Exchange.Type,
