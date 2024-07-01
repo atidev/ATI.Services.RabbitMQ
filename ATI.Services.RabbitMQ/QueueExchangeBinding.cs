@@ -14,6 +14,7 @@ public class QueueExchangeBinding(
     Action<IQueueDeclareConfiguration> queueConfiguration = null,
     Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
 {
+    //for back compatibility release 
     [Obsolete("Use constructor with queueConfiguration and consumerConfiguration")]
     public QueueExchangeBinding(ExchangeInfo exchange,
                                 Queue queue,
