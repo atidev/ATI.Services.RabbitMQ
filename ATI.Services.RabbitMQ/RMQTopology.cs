@@ -1,6 +1,8 @@
-﻿using System.Net;
+﻿using System;
+using System.Net;
 using ATI.Services.Common.Behaviors;
 using ATI.Services.Common.Extensions;
+using EasyNetQ;
 using EasyNetQ.Topology;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Options;
@@ -8,16 +10,11 @@ using Microsoft.Extensions.Options;
 namespace ATI.Services.RabbitMQ;
 
 [PublicAPI]
-public class RmqTopology
+public class RmqTopology(IOptions<EventbusOptions> options)
 {
-    private readonly EventbusOptions _eventbusOptions;
+    private readonly EventbusOptions _eventbusOptions = options.Value;
 
     private const string SubscriptionType = "eventbus";
-
-    public RmqTopology(IOptions<EventbusOptions> options)
-    {
-        _eventbusOptions = options.Value;
-    }
 
     /// <summary>
     /// </summary>
@@ -38,7 +35,9 @@ public class RmqTopology
         bool isExclusiveQueueName = false,
         string customQueueName = null,
         string entityName = null,
-        string queueType = EasyNetQ.QueueType.Quorum)
+        string queueType = QueueType.Quorum,
+        Action<IQueueDeclareConfiguration> queueConfiguration = null,
+        Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
     {
         var queueName =
             EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName,
@@ -51,13 +50,18 @@ public class RmqTopology
             Name = exchangeName,
             Type = ExchangeType.Topic
         };
-        return new QueueExchangeBinding(subscribeExchange, createdQueue, routingKey, queueType);
+        return new QueueExchangeBinding(subscribeExchange,
+                                        createdQueue,
+                                        routingKey,
+                                        queueType,
+                                        queueConfiguration,
+                                        consumerConfiguration);
     }
 
     private readonly string _queuePostfixName = $"-{Dns.GetHostName()}-{ConfigurationManager.GetApplicationPort()}";
 
     private string EventbusQueueNameTemplate(
-        string rabbitService, 
+        string rabbitService,
         string routingKey,
         string customQueueName, 
         bool isExclusiveQueueName,
