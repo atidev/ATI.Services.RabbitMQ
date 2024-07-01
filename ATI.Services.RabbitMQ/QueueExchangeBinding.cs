@@ -14,6 +14,15 @@ public class QueueExchangeBinding(
     Action<IQueueDeclareConfiguration> queueConfiguration = null,
     Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
 {
+    [Obsolete("Use constructor with queueConfiguration and consumerConfiguration")]
+    public QueueExchangeBinding(ExchangeInfo exchange,
+                                Queue queue,
+                                string routingKey,
+                                string queueType = EasyNetQ.QueueType.Quorum)
+        :this(exchange, queue, routingKey, queueType, null, null)
+    {
+    }
+    
     public Queue Queue { get; } = queue;
     public string RoutingKey { get; } = routingKey;
     public ExchangeInfo Exchange { get; } = exchange;
