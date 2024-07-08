@@ -200,6 +200,19 @@ public class EventbusManager : IDisposable, IInitializer
                                Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
                                string metricEntity = null)
     {
+        return SubscribeAsync(bindingInfo,
+                              async (body, props, info) =>
+                              {
+                                  await handler(body, props, info);
+                                  return AckStrategies.Ack;
+                              },
+                              metricEntity);
+    }
+
+    public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
+                               Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
+                               string metricEntity = null)
+    {
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
         //wait for 1 sec to return else subscribe in background
@@ -222,25 +235,6 @@ public class EventbusManager : IDisposable, IInitializer
         Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
             Policy.Handle<Exception>()
                 .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
-
-    private async Task ExecuteWithPolicy(Func<Task> action)
-    {
-        var policy = Policy.Handle<TimeoutException>()
-            .WaitAndRetryAsync(
-                RetryAttemptMax,
-                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                (exception, timeSpan, retryCount, _) =>
-                {
-                    _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
-                });
-
-        var policyResult = await policy.ExecuteAndCaptureAsync(async () => await action.Invoke());
-
-        if (policyResult.FinalException != null)
-        {
-            _logger.ErrorWithObject(policyResult.FinalException, action);
-        }
-    }
 
     private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
     {
@@ -294,22 +288,34 @@ public class EventbusManager : IDisposable, IInitializer
 
     private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
-        Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
         string metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
-        var consumer = _busClient.Consume(queue, HandleEventBusMessageWithPolicy);
+        var consumer = _busClient.Consume(queue,
+                                          HandleEventBusMessageWithPolicyAckStrategy,
+                                          bindingInfo.ConsumerConfiguration ?? (_ => { }));
 
         return consumer;
         
-        async Task HandleEventBusMessageWithPolicy(ReadOnlyMemory<byte> body, MessageProperties props, MessageReceivedInfo info)
+        async Task<AckStrategy> HandleEventBusMessageWithPolicyAckStrategy(ReadOnlyMemory<byte> body,
+                                                                           MessageProperties props,
+                                                                           MessageReceivedInfo info)
         {
             using (_inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
-                                                               $"{info.Exchange}:{info.RoutingKey}",
-                                                               additionalLabels: props.AppId ?? "Unknown"))
+                                                        $"{info.Exchange}:{info.RoutingKey}",
+                                                        additionalLabels: props.AppId ?? "Unknown"))
             {
                 HandleMessageProps(props);
-                await ExecuteWithPolicy(async () => await handler.Invoke(body.ToArray(), props, info));
+                try
+                {
+                    return await handler(body.ToArray(), props, info);
+                }
+                catch (Exception e)
+                {
+                    _logger.ErrorWithObject(e, "Error while handling eventbus message", new {info.Exchange, info.RoutingKey});
+                    throw;
+                }
             }
         }
     }
@@ -384,10 +390,14 @@ public class EventbusManager : IDisposable, IInitializer
     private async Task<Queue> DeclareBindQueue(QueueExchangeBinding bindingInfo)
     {
         var queue = await _busClient.QueueDeclareAsync(bindingInfo.Queue.Name,
-                                                       c => c.AsAutoDelete(bindingInfo.Queue.IsAutoDelete)
-                                                             .AsDurable(bindingInfo.Queue.IsDurable)
-                                                             .AsExclusive(bindingInfo.Queue.IsExclusive)
-                                                             .WithQueueType(bindingInfo.QueueType));
+                                                       c =>
+                                                       {
+                                                           bindingInfo.QueueConfiguration?.Invoke(c);
+                                                           c.AsAutoDelete(bindingInfo.Queue.IsAutoDelete)
+                                                            .AsDurable(bindingInfo.Queue.IsDurable)
+                                                            .AsExclusive(bindingInfo.Queue.IsExclusive)
+                                                            .WithQueueType(bindingInfo.QueueType);
+                                                       });
 
         var exchange = new Exchange(bindingInfo.Exchange.Name,
                                     bindingInfo.Exchange.Type,

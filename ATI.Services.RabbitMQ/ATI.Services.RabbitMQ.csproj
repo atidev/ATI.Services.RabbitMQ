@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup Label="Main">
-    <TargetFramework>net7.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
     <Authors>Team Services</Authors>
     <Company>ATI</Company>
@@ -16,7 +16,7 @@
     <NoWarn>1701;1702;CS1591;CS1571;CS1573;CS1574</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="atisu.services.common" Version="15.0.0" />
+    <PackageReference Include="atisu.services.common" Version="16.4.0" />
     <PackageReference Include="EasyNetQ" Version="7.4.3" />
   </ItemGroup>
 </Project>
