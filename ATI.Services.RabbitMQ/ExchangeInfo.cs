@@ -1,8 +1,7 @@
-﻿namespace ATI.Services.RabbitMQ
+﻿namespace ATI.Services.RabbitMQ;
+
+public class ExchangeInfo
 {
-    public class ExchangeInfo
-    {
-        public string Name { get; set; }
-        public string Type { get; set; }
-    }
+    public required string Name { get; init; }
+    public required string Type { get; init; }
 }

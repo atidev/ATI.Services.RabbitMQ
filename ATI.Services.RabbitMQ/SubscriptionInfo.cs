@@ -7,13 +7,13 @@ namespace ATI.Services.RabbitMQ;
 
 public class SubscriptionInfo
 {
-    public QueueExchangeBinding Binding { get; set; }
+    public required QueueExchangeBinding Binding { get; init; }
 
-    public Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> EventbusSubscriptionHandler { get; set; }
+    public required Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> EventbusSubscriptionHandler { get; init; }
 
-    public string MetricsEntity { get; set; }
-    public IDisposable Consumer { get; set; }
+    public string? MetricsEntity { get; init; }
+    public required IDisposable Consumer { get; set; }
 
-    public Task ResubscribeTask { get; set; }
+    public Task? ResubscribeTask { get; set; }
     public object ResubscribeLock { get; } = new();
 }
