@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -33,7 +34,7 @@ namespace ATI.Services.RabbitMQ;
 [InitializeOrder(Order = InitializeOrder.First)]
 public class EventbusManager : IDisposable, IInitializer
 {
-    private IAdvancedBus _busClient;
+    private IAdvancedBus _busClient = null!;
     private const int RetryAttemptMax = 3;
     private const int MaxRetryDelayPow = 2;
     private const string DelayQueueSuffix = "_delay";
@@ -45,11 +46,10 @@ public class EventbusManager : IDisposable, IInitializer
     private readonly MetricsInstance _outMetrics;
 
     private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
-    private ConcurrentBag<SubscriptionInfo> _subscriptions = new();
+    private readonly ConcurrentBag<SubscriptionInfo> _subscriptions = [];
     private readonly AsyncRetryPolicy _retryForeverPolicy;
     private readonly AsyncRetryPolicy _subscribePolicy;
     private readonly EventbusOptions _options;
-    private static readonly UTF8Encoding BodyEncoding = new(false);
     private readonly RmqTopology _rmqTopology;
 
     public EventbusManager(
@@ -73,7 +73,7 @@ public class EventbusManager : IDisposable, IInitializer
         _retryForeverPolicy =
             Policy.Handle<Exception>()
                   .WaitAndRetryForeverAsync(
-                      retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, Math.Min(retryAttempt, MaxRetryDelayPow))),
+                      retryAttempt => TimeSpan.FromSeconds(1 << Math.Min(retryAttempt, MaxRetryDelayPow)),
                       (exception, _) => _logger.Error(exception));
     }
 
@@ -100,8 +100,8 @@ public class EventbusManager : IDisposable, IInitializer
         return Task.CompletedTask;
     }
 
-    public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) =>
-        _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
+    public Task<Exchange> DeclareExchangeTopicAsync(string exchangeName, bool durable, bool autoDelete) 
+        => _busClient.ExchangeDeclareAsync(exchangeName, ExchangeType.Topic, durable, autoDelete);
     
     public Task<Exchange> DeclareExchangeTypedAsync(string exchangeName,bool durable, bool autoDelete, 
         string type = ExchangeType.Topic) => _busClient.ExchangeDeclareAsync(exchangeName, type, durable, autoDelete);
@@ -111,34 +111,36 @@ public class EventbusManager : IDisposable, IInitializer
         string exchangeName,
         string routingKey,
         string metricEntity,
-        Dictionary<string, object> additionalHeaders = null,
+        Dictionary<string, object>? additionalHeaders = null,
         bool mandatory = false,
         TimeSpan? timeout = null,
         bool withAcceptLang = true)
     {
-        if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
-            string.IsNullOrWhiteSpace(publishBody))
+        if (string.IsNullOrWhiteSpace(exchangeName)
+            || string.IsNullOrWhiteSpace(routingKey)
+            || string.IsNullOrWhiteSpace(publishBody))
             return;
 
-        using (_outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
+        using var timer = _outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}");
+
+        var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
+        var exchange = new Exchange(exchangeName);
+        var body = Encoding.UTF8.GetBytes(publishBody);
+
+        var sendingResult = await SetupPolicy(timeout)
+            .ExecuteAndCaptureAsync(async () =>
+                await _busClient.PublishAsync(
+                    exchange,
+                    routingKey,
+                    mandatory,
+                    messageProperties,
+                    body)
+            );
+
+        if (sendingResult.FinalException != null)
         {
-            var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
-            var exchange = new Exchange(exchangeName);
-            var body = BodyEncoding.GetBytes(publishBody);
-
-            var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
-                                    await _busClient.PublishAsync(
-                                        exchange,
-                                        routingKey,
-                                        mandatory,
-                                        messageProperties,
-                                        body));
-
-            if (sendingResult.FinalException != null)
-            {
-                _logger.ErrorWithObject(sendingResult.FinalException,
-                                        new { publishBody, exchangeName, routingKey, metricEntity, mandatory });
-            }
+            _logger.ErrorWithObject(sendingResult.FinalException,
+                new { publishBody, exchangeName, routingKey, metricEntity, mandatory });
         }
     }
 
@@ -147,36 +149,38 @@ public class EventbusManager : IDisposable, IInitializer
         string exchangeName,
         string routingKey,
         string metricEntity,
-        Dictionary<string, object> additionalHeaders = null,
+        Dictionary<string, object>? additionalHeaders = null,
         bool mandatory = false,
-        JsonSerializer serializer = null,
+        JsonSerializer? serializer = null,
         TimeSpan? timeout = null,
         bool withAcceptLang = true)
     {
-        if (string.IsNullOrWhiteSpace(exchangeName) || string.IsNullOrWhiteSpace(routingKey) ||
-            publishObject == null)
+        if (string.IsNullOrWhiteSpace(exchangeName)
+            || string.IsNullOrWhiteSpace(routingKey)
+            || publishObject == null)
             return;
 
-        using (_outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}"))
+        using var timer = _outMetrics.CreateLoggingMetricsTimer(metricEntity, $"{exchangeName}:{routingKey}");
+
+        var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
+        var exchange = new Exchange(exchangeName);
+        var bodySerializer = serializer ?? _jsonSerializer;
+        var body = bodySerializer.ToJsonBytes(publishObject);
+
+        var sendingResult = await SetupPolicy(timeout)
+            .ExecuteAndCaptureAsync(async () =>
+                await _busClient.PublishAsync(
+                    exchange,
+                    routingKey,
+                    mandatory,
+                    messageProperties,
+                    body)
+            );
+
+        if (sendingResult.FinalException != null)
         {
-            var messageProperties = GetProperties(additionalHeaders, withAcceptLang);
-            var exchange = new Exchange(exchangeName);
-            var bodySerializer = serializer ?? _jsonSerializer;
-            var body = bodySerializer.ToJsonBytes(publishObject);
-
-            var sendingResult = await SetupPolicy(timeout).ExecuteAndCaptureAsync(async () =>
-                                    await _busClient.PublishAsync(
-                                        exchange,
-                                        routingKey,
-                                        mandatory,
-                                        messageProperties,
-                                        body));
-
-            if (sendingResult.FinalException != null)
-            {
-                _logger.ErrorWithObject(sendingResult.FinalException,
-                                        new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
-            }
+            _logger.ErrorWithObject(sendingResult.FinalException,
+                new { publishObject, exchangeName, routingKey, metricEntity, mandatory });
         }
     }
 
@@ -188,17 +192,18 @@ public class EventbusManager : IDisposable, IInitializer
         bool isAutoDelete,
         Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
         bool isExclusiveQueueName = false,
-        string customQueueName = null,
-        string metricEntity = null)
+        string? customQueueName = null,
+        string? metricEntity = null)
     {
         var binding = _rmqTopology.CreateBinding(exchangeName, routingKey, isExclusive, isDurable, isAutoDelete,
                                                  isExclusiveQueueName, customQueueName);
+
         return SubscribeAsync(binding, handler, metricEntity);
     }
 
     public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
                                Func<byte[], MessageProperties, MessageReceivedInfo, Task> handler,
-                               string metricEntity = null)
+                               string? metricEntity = null)
     {
         return SubscribeAsync(bindingInfo,
                               async (body, props, info) =>
@@ -211,7 +216,7 @@ public class EventbusManager : IDisposable, IInitializer
 
     public Task SubscribeAsync(QueueExchangeBinding bindingInfo,
                                Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
-                               string metricEntity = null)
+                               string? metricEntity = null)
     {
         RabbitMqDeclaredQueues.DeclaredQueues.Add(bindingInfo.Queue);
 
@@ -231,7 +236,7 @@ public class EventbusManager : IDisposable, IInitializer
             }));
     }
 
-    private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+    private static AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
         Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
             Policy.Handle<Exception>()
                 .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
@@ -241,7 +246,7 @@ public class EventbusManager : IDisposable, IInitializer
         var policy = Policy.Handle<TimeoutException>()
                            .WaitAndRetryAsync(
                                 RetryAttemptMax,
-                                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                                retryAttempt => TimeSpan.FromSeconds(1 << retryAttempt),
                                 (exception, timeSpan, retryCount, _) =>
                                 {
                                     _logger.ErrorWithObject(exception, new {TimeSpan = timeSpan, RetryCount = retryCount});
@@ -281,7 +286,8 @@ public class EventbusManager : IDisposable, IInitializer
                                                                       subscription.MetricsEntity);
                         subscription.Consumer.Dispose();
                         subscription.Consumer = newConsumer;
-                    });
+                    }
+                );
             }
         }
     }
@@ -289,44 +295,45 @@ public class EventbusManager : IDisposable, IInitializer
     private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
         Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
-        string metricEntity)
+        string? metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
         var consumer = _busClient.Consume(queue,
                                           HandleEventBusMessageWithPolicyAckStrategy,
-                                          bindingInfo.ConsumerConfiguration ?? (_ => { }));
-
+                                          bindingInfo.ConsumerConfiguration ?? SkipConsumerConfiguration);
         return consumer;
-        
+
         async Task<AckStrategy> HandleEventBusMessageWithPolicyAckStrategy(ReadOnlyMemory<byte> body,
                                                                            MessageProperties props,
                                                                            MessageReceivedInfo info)
         {
-            using (_inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
-                                                        $"{info.Exchange}:{info.RoutingKey}",
-                                                        additionalLabels: props.AppId ?? "Unknown"))
+            using var timer = _inMetrics.CreateLoggingMetricsTimer(metricEntity ?? "Eventbus",
+                       $"{info.Exchange}:{info.RoutingKey}",
+                       additionalLabels: props.AppId ?? "Unknown");
+
+            HandleMessageProps(props);
+            try
             {
-                HandleMessageProps(props);
-                try
-                {
-                    return await handler(body.ToArray(), props, info);
-                }
-                catch (Exception e)
-                {
-                    _logger.ErrorWithObject(e, "Error while handling eventbus message", new {info.Exchange, info.RoutingKey});
-                    throw;
-                }
+                return await handler(body.ToArray(), props, info);
+            }
+            catch (Exception e)
+            {
+                _logger.ErrorWithObject(e, "Error while handling eventbus message", new {info.Exchange, info.RoutingKey});
+                throw;
             }
         }
+
+        static void SkipConsumerConfiguration(ISimpleConsumeConfiguration _) { }
     }
 
-    private async Task BindConsumerAsync(QueueExchangeBinding mainQueueBinding,
+    public async Task BindConsumerAsync(
+        QueueExchangeBinding mainQueueBinding,
         QueueExchangeBinding delayQueueBinding,
         QueueExchangeBinding poisonQueueBinding,
         Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> handler,
-        Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>> poisonHandler,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<Acknowledgements>>? poisonHandler,
         DelayedRequeueConfiguration delayedConfig,
-        string metricEntity)
+        string? metricEntity)
     {
         var mainQueue = await DeclareBindQueue(mainQueueBinding);
         _busClient.Consume(mainQueue, HandleEventBusMessageWithPolicyAndRequeue());
@@ -336,6 +343,8 @@ public class EventbusManager : IDisposable, IInitializer
             var poisonQueue = await DeclareBindQueue(poisonQueueBinding);
             _busClient.Consume(poisonQueue, HandlePoisonQueueMessages());
         }
+
+        return;
 
         Func<ReadOnlyMemory<byte>, MessageProperties, MessageReceivedInfo, Task<AckStrategy>>
             HandleEventBusMessageWithPolicyAndRequeue()
@@ -353,15 +362,14 @@ public class EventbusManager : IDisposable, IInitializer
 
                     return handlerAcknowledgeResponse switch
                     {
-                        Acknowledgements.Ack => AckStrategies.Ack,
-
                         Acknowledgements.Nack => await HandleNackResponse(
                             mainQueueBinding,
                             delayQueueBinding,
                             poisonQueueBinding,
                             delayedConfig,
                             props,
-                            body.ToArray()),
+                            body.ToArray()
+                        ),
 
                         Acknowledgements.Reject => AckStrategies.NackWithRequeue,
 
@@ -416,7 +424,6 @@ public class EventbusManager : IDisposable, IInitializer
         GetAcceptLanguageFromProperties(props);
     }
 
-#nullable enable
     private async Task<AckStrategy> HandleNackResponse(
         QueueExchangeBinding mainQueueBinding,
         QueueExchangeBinding delayQueueBinding,
@@ -425,8 +432,8 @@ public class EventbusManager : IDisposable, IInitializer
         MessageProperties props,
         byte[] body)
     {
-        var counter = props.Headers.TryGetValue("x-counter", out object? xCounterHeader)
-                      && int.TryParse(xCounterHeader?.ToString(), out int headerCounter)
+        var counter = props.Headers.TryGetValue("x-counter", out var xCounterHeader)
+                      && int.TryParse(xCounterHeader?.ToString(), out var headerCounter)
             ? headerCounter
             : 0;
 
@@ -446,7 +453,6 @@ public class EventbusManager : IDisposable, IInitializer
 
         return AckStrategies.Ack;
     }
-#nullable disable
 
     private async Task PublishToPoisonQueueAsync(QueueExchangeBinding poisonQueueBinding, byte[] messageBody)
     {
@@ -495,7 +501,7 @@ public class EventbusManager : IDisposable, IInitializer
         {
             await _busClient.QueueDeclareAsync(
                 delayQueueBinding.Queue.Name,
-                c => c.WithArgument("x-dead-letter-exchange", String.Empty)
+                c => c.WithArgument("x-dead-letter-exchange", string.Empty)
                       .WithArgument("x-dead-letter-routing-key", mainQueue.Queue.Name)
                       .WithArgument("x-message-ttl", delayedQueueRequeueTtl)
                       .AsAutoDelete(delayQueueBinding.Queue.IsAutoDelete)
@@ -517,7 +523,7 @@ public class EventbusManager : IDisposable, IInitializer
             delayQueueBinding.Exchange.Name,
             delayQueueBinding.Exchange.Type);
 
-        _busClient.Bind(delayExchange, delayQueueBinding.Queue, delayQueueBinding.RoutingKey);
+        await _busClient.BindAsync(delayExchange, delayQueueBinding.Queue, delayQueueBinding.RoutingKey);
         await SetupPolicy().ExecuteAndCaptureAsync(async () =>
             await _busClient.PublishAsync(
                 delayExchange,
@@ -539,7 +545,7 @@ public class EventbusManager : IDisposable, IInitializer
             if (!props.Headers.TryGetValue(MessagePropertiesNames.AcceptLang, out var acceptLanguage))
                 return;
 
-            var acceptLanguageStr = BodyEncoding.GetString((byte[]) acceptLanguage);
+            var acceptLanguageStr = Encoding.UTF8.GetString((byte[]) acceptLanguage);
             FlowContext<RequestMetaData>.Current =
                 new RequestMetaData
                 {
@@ -555,7 +561,7 @@ public class EventbusManager : IDisposable, IInitializer
         }
     }
 
-    private MessageProperties GetProperties(Dictionary<string, object> additionalHeaders, bool withAcceptLang)
+    private static MessageProperties GetProperties(Dictionary<string, object>? additionalHeaders, bool withAcceptLang)
     {
         var messageProperties = new MessageProperties
         {
@@ -566,18 +572,18 @@ public class EventbusManager : IDisposable, IInitializer
         if (withAcceptLang)
             SetAcceptLanguageHeader(messageProperties);
 
-        if (additionalHeaders != null)
+        if (additionalHeaders == null) 
+            return messageProperties;
+
+        foreach (var additionalHeader in additionalHeaders)
         {
-            foreach (var additionalHeader in additionalHeaders)
-            {
-                messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
-            }
+            messageProperties.Headers.TryAdd(additionalHeader.Key, additionalHeader.Value);
         }
 
         return messageProperties;
     }
 
-    private void SetTraceHeadersFromActivity(MessageProperties properties)
+    private static void SetTraceHeadersFromActivity(MessageProperties properties)
     {
         if (Activity.Current is not { Baggage: { } bgg })
             return;
@@ -592,7 +598,7 @@ public class EventbusManager : IDisposable, IInitializer
         properties.Headers.Add(MessagePropertiesNames.Baggage, string.Join(", ", baggageProperties));
     }
 
-    private void SetAcceptLanguageHeader(MessageProperties properties)
+    private static void SetAcceptLanguageHeader(MessageProperties properties)
     {
         var flowAcceptLang = FlowContext<RequestMetaData>.Current.AcceptLanguage;
         if (flowAcceptLang != null)
@@ -602,11 +608,11 @@ public class EventbusManager : IDisposable, IInitializer
     public void Dispose()
     {
         // Сделано для удобства локального тестирования, удаляем наши созданные очереди
-        if (_options.DeleteQueuesOnApplicationShutdown && _busClient != null)
+        if (_options.DeleteQueuesOnApplicationShutdown)
         {
             foreach (var queue in RabbitMqDeclaredQueues.DeclaredQueues)
             {
-                _busClient.QueueDelete(queue.Name);
+                _busClient?.QueueDelete(queue.Name);
             }
         }
         
