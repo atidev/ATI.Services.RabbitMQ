@@ -293,7 +293,7 @@ public class EventbusManager : IDisposable, IInitializer
 
     private async Task<IDisposable> SubscribePrivateAsync(
         QueueExchangeBinding bindingInfo,
-        Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>> handler,
+        Func<byte[], MessageProperties, MessageReceivedInfo, Task<AckStrategy>>? handler,
         string? metricEntity)
     {
         var queue = await DeclareBindQueue(bindingInfo);
@@ -311,9 +311,10 @@ public class EventbusManager : IDisposable, IInitializer
                        additionalLabels: props.AppId ?? "Unknown");
 
             HandleMessageProps(props);
+
             try
             {
-                return await handler(body.ToArray(), props, info);
+                return await handler!(body.ToArray(), props, info);
             }
             catch (Exception e)
             {
