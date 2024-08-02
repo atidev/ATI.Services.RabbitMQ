@@ -3,24 +3,23 @@ using ATI.Services.Common.Extensions;
 using JetBrains.Annotations;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ;
+
+public static class RabbitMqExtensions
 {
-    public static class RabbitMqExtensions
+    [PublicAPI]
+    public static void AddEventBus(this IServiceCollection services, string? eventbusSectionName = null)
     {
-        [PublicAPI]
-        public static void AddEventBus(this IServiceCollection services, string eventbusSectionName = null)
+        if (eventbusSectionName is null)
         {
-            if (eventbusSectionName != null)
-            {
-                services.Configure<EventbusOptions>(ConfigurationManager.GetSection(eventbusSectionName));
-            }
-            else
-            {
-                services.ConfigureByName<EventbusOptions>();
-            }
-            
-            services.AddSingleton<EventbusManager>();
-            services.AddSingleton<RmqTopology>();
+            services.ConfigureByName<EventbusOptions>();
         }
+        else
+        {
+            services.Configure<EventbusOptions>(ConfigurationManager.GetSection(eventbusSectionName));
+        }
+            
+        services.AddSingleton<EventbusManager>();
+        services.AddSingleton<RmqTopology>();
     }
 }

@@ -33,11 +33,11 @@ public class RmqTopology(IOptions<EventbusOptions> options)
         bool isDurable,
         bool isAutoDelete,
         bool isExclusiveQueueName = false,
-        string customQueueName = null,
-        string entityName = null,
+        string? customQueueName = null,
+        string? entityName = null,
         string queueType = QueueType.Quorum,
-        Action<IQueueDeclareConfiguration> queueConfiguration = null,
-        Action<ISimpleConsumeConfiguration> consumerConfiguration = null)
+        Action<IQueueDeclareConfiguration>? queueConfiguration = null,
+        Action<ISimpleConsumeConfiguration>? consumerConfiguration = null)
     {
         var queueName =
             EventbusQueueNameTemplate(exchangeName, routingKey, customQueueName, isExclusiveQueueName,
@@ -63,9 +63,9 @@ public class RmqTopology(IOptions<EventbusOptions> options)
     private string EventbusQueueNameTemplate(
         string rabbitService,
         string routingKey,
-        string customQueueName, 
+        string? customQueueName, 
         bool isExclusiveQueueName,
-        string entityName = null)
+        string? entityName = null)
     {
         var exchangeNameWithoutEnv = entityName;
         if (exchangeNameWithoutEnv is null)
@@ -75,13 +75,12 @@ public class RmqTopology(IOptions<EventbusOptions> options)
             if (string.IsNullOrEmpty(exchangeNameWithoutEnv))
                 exchangeNameWithoutEnv = rabbitService;
         }
-        
-        var queueSuffix = customQueueName.IsNullOrEmpty()
+
+        var queueSuffix = string.IsNullOrEmpty(customQueueName)
             ? $"{_eventbusOptions.ServiceName}.{exchangeNameWithoutEnv}.{routingKey}"
             : customQueueName;
-        
-        var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}.{queueSuffix}";
 
+        var queueName = $"{_eventbusOptions.Environment}.{SubscriptionType}.{queueSuffix}";
 
         if (_eventbusOptions.AddHostnamePostfixToQueues || isExclusiveQueueName)
             queueName += _queuePostfixName;

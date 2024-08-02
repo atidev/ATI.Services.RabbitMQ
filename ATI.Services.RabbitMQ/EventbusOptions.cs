@@ -1,21 +1,20 @@
 using System;
 
-namespace ATI.Services.RabbitMQ
+namespace ATI.Services.RabbitMQ;
+
+public class EventbusOptions 
 {
-    public class EventbusOptions 
-    {
-        public string ServiceName { get; set; }
-        public string ConnectionString { get; set; }
-        public string Environment { get; set; }
-        public TimeSpan RabbitConnectInterval { get; set; } = TimeSpan.FromSeconds(5);
-        public bool Enabled { get; set; }
-        public string ErrorQueueName { get; set; }
+    public required string ServiceName { get; init; }
+    public required string ConnectionString { get; init; }
+    public required string Environment { get; init; }
+    public required TimeSpan RabbitConnectInterval { get; set; } = TimeSpan.FromSeconds(5);
+    public required bool Enabled { get; init; }
+    public string? ErrorQueueName { get; init; }
 
-        #region ForLocalTesting
+    #region ForLocalTesting
 
-        public bool AddHostnamePostfixToQueues { get; set; }
-        public bool DeleteQueuesOnApplicationShutdown { get; set; }
+    public bool AddHostnamePostfixToQueues { get; init; }
+    public bool DeleteQueuesOnApplicationShutdown { get; init; }
 
-        #endregion
-    }
+    #endregion
 }

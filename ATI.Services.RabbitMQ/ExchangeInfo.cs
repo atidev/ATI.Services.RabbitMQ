@@ -1,8 +1,8 @@
-﻿namespace ATI.Services.RabbitMQ
+﻿// ReSharper disable PropertyCanBeMadeInitOnly.Global
+namespace ATI.Services.RabbitMQ;
+
+public class ExchangeInfo
 {
-    public class ExchangeInfo
-    {
-        public string Name { get; set; }
-        public string Type { get; set; }
-    }
+    public required string Name { get; set; }
+    public required string Type { get; set; }
 }
