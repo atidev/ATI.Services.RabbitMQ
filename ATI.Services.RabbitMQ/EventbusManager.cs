@@ -84,7 +84,11 @@ public class EventbusManager : IDisposable, IInitializer
                                                serviceRegister =>
                                                {
                                                    serviceRegister.Register<IConventions>(c =>
-                                                       new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options));
+                                                       new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options)
+                                                   );
+
+                                                   if (_options.EnableConsoleLogger)
+                                                       serviceRegister.EnableConsoleLogger();
                                                }).Advanced;
 
             _busClient.Connected += (_, _) => ResubscribeOnReconnect();
