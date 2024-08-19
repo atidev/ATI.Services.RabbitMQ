@@ -16,6 +16,7 @@ public class EventbusOptions
     public bool AddHostnamePostfixToQueues { get; init; }
     public bool DeleteQueuesOnApplicationShutdown { get; init; }
     public bool EnableConsoleLogger { get; init; }
+    public bool LogInnerExceptionsInRetryPolicy { get; init; }
 
     #endregion
 }

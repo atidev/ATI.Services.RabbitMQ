@@ -249,7 +249,8 @@ public class EventbusManager : IDisposable, IInitializer
                      _ => TimeSpan.FromSeconds(1),
                      (exception, timeSpan, retryCount, _) =>
                      {
-                         _logger.ErrorWithObject(exception, new { TimeSpan = timeSpan, RetryCount = retryCount });
+                         if(_options.LogInnerExceptionsInRetryPolicy)
+                            _logger.ErrorWithObject(exception, new { TimeSpan = timeSpan, RetryCount = retryCount });
                      }
                    )
         );
