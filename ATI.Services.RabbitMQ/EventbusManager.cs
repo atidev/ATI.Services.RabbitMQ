@@ -84,7 +84,11 @@ public class EventbusManager : IDisposable, IInitializer
                                                serviceRegister =>
                                                {
                                                    serviceRegister.Register<IConventions>(c =>
-                                                       new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options));
+                                                       new RabbitMqConventions(c.Resolve<ITypeNameSerializer>(), _options)
+                                                   );
+
+                                                   if (_options.EnableConsoleLogger)
+                                                       serviceRegister.EnableConsoleLogger();
                                                }).Advanced;
 
             _busClient.Connected += (_, _) => ResubscribeOnReconnect();
@@ -173,7 +177,8 @@ public class EventbusManager : IDisposable, IInitializer
                     routingKey,
                     mandatory,
                     messageProperties,
-                    body)
+                    body
+                )
             );
 
         if (sendingResult.FinalException != null)
@@ -235,10 +240,20 @@ public class EventbusManager : IDisposable, IInitializer
             }));
     }
 
-    private static AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
-        Policy.WrapAsync(Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(2)),
+    private AsyncPolicyWrap SetupPolicy(TimeSpan? timeout = null) =>
+        Policy.WrapAsync(
+            Policy.TimeoutAsync(timeout ?? TimeSpan.FromSeconds(3)),
             Policy.Handle<Exception>()
-                .WaitAndRetryAsync(3, _ => TimeSpan.FromSeconds(3)));
+                  .WaitAndRetryAsync(
+                     3, 
+                     _ => TimeSpan.FromSeconds(1),
+                     (exception, timeSpan, retryCount, _) =>
+                     {
+                         if(_options.LogInnerExceptionsInRetryPolicy)
+                            _logger.ErrorWithObject(exception, new { TimeSpan = timeSpan, RetryCount = retryCount });
+                     }
+                   )
+        );
 
     private async Task<Acknowledgements> ExecuteWithPolicy(Func<Task<Acknowledgements>> action)
     {
